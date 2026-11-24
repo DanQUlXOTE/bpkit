@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -107,6 +108,11 @@ func (c *Client) do(req *http.Request) (int, []byte, error) {
 	return resp.StatusCode, body, err
 }
 
+// ErrNotFound reports that the server has no such resource. Callers use it
+// to tell "absent" apart from "could not be read", which are very different
+// answers when deciding whether to create something.
+var ErrNotFound = errors.New("not found")
+
 // get fetches path and fails on any 4xx/5xx.
 func (c *Client) get(ctx context.Context, path string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
@@ -116,6 +122,9 @@ func (c *Client) get(ctx context.Context, path string) ([]byte, error) {
 	status, body, err := c.do(req)
 	if err != nil {
 		return nil, err
+	}
+	if status == http.StatusNotFound {
+		return nil, fmt.Errorf("bindplane GET %s: %w", path, ErrNotFound)
 	}
 	if status >= 400 {
 		return nil, fmt.Errorf("bindplane GET %s: %d %s", path, status, truncate(string(body), 500))
@@ -458,6 +467,16 @@ func ResourceTypeKind(k Kind) Kind {
 		return KindExtensionType
 	}
 	return ""
+}
+
+// IsResourceTypeKind reports whether k holds type definitions rather than
+// the resources built on them.
+func IsResourceTypeKind(k Kind) bool {
+	switch k {
+	case KindSourceType, KindProcessorType, KindDestinationType, KindExtensionType:
+		return true
+	}
+	return false
 }
 
 // TrimVersion drops the ":version" suffix from a type reference such as

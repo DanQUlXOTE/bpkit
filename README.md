@@ -149,12 +149,29 @@ one for the sources, processors, destinations and extensions it references and
 pulls those along too — components defined inline travel with their
 configuration, library resources are copied as resources in their own right.
 
-It also carries the **type definitions** those resources are built on
+It also reports the **type definitions** those resources are built on
 (`SourceType`, `ProcessorType`, `DestinationType`, `ExtensionType`). A project
 that lacks them rejects the apply with `unknown DestinationType: dev_null`,
 because Bindplane cannot render a configuration whose component types it does
-not know. Types that already match in the destination show as identical and
-are skipped, so this costs nothing when both projects are seeded alike.
+not know.
+
+Type definitions always start **skipped**, because they are the server's to
+provide: Bindplane seeds its built-in library itself, and a freshly created
+project can still be loading it. If the plan reports missing types, the usual
+answer is to wait for the destination to finish seeding and re-run. Applying a
+built-in type over the REST API can also fail validation outright, with an
+error like:
+
+```
+template: logs.receivers:22:10: executing "logs.receivers" at <gt .initial_lookback 0>:
+  error calling gt: incompatible types for comparison: float64 and int
+```
+
+That is a Bindplane server bug, not something the client can work around: JSON
+has no integer type, so an `int` parameter default arrives as a float, and the
+apply-time validation path does not normalize it the way the render path does.
+You can still opt a type in with `space` — useful for a type you authored
+yourself — but expect built-ins to fail.
 
 It then compares everything against the destination and reports each resource
 as **new**, **identical**, or a **conflict**. Only new resources are selected

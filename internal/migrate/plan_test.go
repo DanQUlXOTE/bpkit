@@ -181,10 +181,19 @@ func TestBuildFollowsReferences(t *testing.T) {
 		t.Fatalf("configuration must come last, found at %d of %d", cfgAt, len(p.Items))
 	}
 
-	// Everything is new in an empty destination, so everything applies.
+	// The 3 resources apply; the 3 type definitions are the server's to
+	// seed and start skipped.
 	apply, skip, conflict := p.Counts()
-	if apply != 6 || skip != 0 || conflict != 0 {
+	if apply != 3 || skip != 3 || conflict != 0 {
 		t.Fatalf("counts: apply=%d skip=%d conflict=%d", apply, skip, conflict)
+	}
+	for _, it := range p.Items {
+		if it.TypeDef != bpclient.IsResourceTypeKind(it.Kind) {
+			t.Fatalf("%s: TypeDef=%v for kind %s", it.Title(), it.TypeDef, it.Kind)
+		}
+		if it.TypeDef && !it.Skip {
+			t.Fatalf("type definition %q must start skipped", it.Title())
+		}
 	}
 	// Server-assigned identity must not travel.
 	for _, it := range p.Items {
@@ -422,6 +431,21 @@ func TestLibraryResourceTypesTravel(t *testing.T) {
 		}
 	}
 
+	// They start skipped, because the server seeds its own built-in types
+	// and applying one over the JSON API can fail validation.
+	for _, it := range p.Items {
+		if it.TypeDef && !it.Skip {
+			t.Fatalf("type %q must start skipped", it.Title())
+		}
+		if it.TypeDef && it.Note == "" {
+			t.Fatalf("type %q should explain why it is skipped", it.Title())
+		}
+	}
+
+	// Opting in applies them, ahead of the destinations that need them.
+	for i := range p.Items {
+		p.Items[i].Skip = false
+	}
 	if _, err := p.Apply(context.Background(), dst.client(t, "")); err != nil {
 		t.Fatal(err)
 	}
@@ -468,5 +492,44 @@ func TestConnectorsAreNotFetched(t *testing.T) {
 	}
 	if len(p.Items) != 1 {
 		t.Fatalf("only the configuration should travel, got %d items", len(p.Items))
+	}
+}
+
+// A destination that cannot be read is not the same as one that has no such
+// resource: assuming "absent" would turn a permissions or decoding problem
+// into an unintended create.
+func TestUnreadableDestinationIsNotTreatedAsNew(t *testing.T) {
+	src := newFakeBP(t)
+	src.put("configurations", "cfg", config("cfg"))
+
+	// A destination that answers 500 to every read.
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"boom"}`, http.StatusInternalServerError)
+	}))
+	defer broken.Close()
+	dst, err := bpclient.New(bpclient.Options{BaseURL: broken.URL, APIKey: "k"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := Build(context.Background(), src.client(t, ""), dst, []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Items) != 1 {
+		t.Fatalf("items: %d", len(p.Items))
+	}
+	it := p.Items[0]
+	if it.Status != StatusUnknown {
+		t.Fatalf("status = %v, want unreadable", it.Status)
+	}
+	if !it.Skip {
+		t.Fatal("an unreadable resource must not be applied by default")
+	}
+	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "could not read the destination") {
+		t.Fatalf("warnings: %v", p.Warnings)
+	}
+	if apply, _, _ := p.Counts(); apply != 0 {
+		t.Fatalf("apply=%d, want 0", apply)
 	}
 }

@@ -7,6 +7,7 @@ package migrate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -30,6 +31,9 @@ const (
 	// StatusConflict means the destination has a resource of this name that
 	// differs from the source's.
 	StatusConflict
+	// StatusUnknown means the destination could not be read, so whether
+	// applying would create or replace is not known.
+	StatusUnknown
 )
 
 func (s Status) String() string {
@@ -38,6 +42,8 @@ func (s Status) String() string {
 		return "identical"
 	case StatusConflict:
 		return "conflict"
+	case StatusUnknown:
+		return "unreadable"
 	}
 	return "new"
 }
@@ -58,6 +64,13 @@ type Item struct {
 	// Root is true for the configurations the user picked, as opposed to the
 	// dependencies pulled in behind them.
 	Root bool
+	// TypeDef marks a resource type definition — a SourceType and friends.
+	// These are server-managed: Bindplane seeds its built-in library itself,
+	// and a freshly created project can still be loading it. They are never
+	// applied unless asked for; see Build.
+	TypeDef bool
+	// Note explains an unusual status to the user.
+	Note string
 }
 
 // Title is the item as shown in a list.
@@ -147,11 +160,20 @@ func Build(ctx context.Context, src, dst *bpclient.Client, configNames []string)
 				Resource: r,
 				Root:     kind == bpclient.KindConfiguration && w.roots[r.Name()],
 			}
-			if err := compare(ctx, dst, &item); err != nil {
-				return nil, err
+			item.TypeDef = bpclient.IsResourceTypeKind(kind)
+			compare(ctx, dst, &item)
+			// Only brand-new resources apply by default, and never a type
+			// definition: those are the server's to seed, and applying one
+			// over the JSON API trips a Bindplane bug where an int
+			// parameter default arrives as a float and template validation
+			// rejects it.
+			item.Skip = item.Status != StatusNew || item.TypeDef
+			if item.TypeDef && item.Status == StatusNew {
+				item.Note = "missing in the destination — built-in types are seeded by the server"
 			}
-			// Only brand-new resources apply by default.
-			item.Skip = item.Status != StatusNew
+			if item.Status == StatusUnknown {
+				p.Warnings = append(p.Warnings, fmt.Sprintf("%s %q: %s", strings.TrimSuffix(string(kind), "s"), item.Title(), item.Note))
+			}
 			p.Items = append(p.Items, item)
 		}
 	}
@@ -159,14 +181,19 @@ func Build(ctx context.Context, src, dst *bpclient.Client, configNames []string)
 	return p, nil
 }
 
-// compare fills in the item's status against the destination.
-func compare(ctx context.Context, dst *bpclient.Client, item *Item) error {
+// compare fills in the item's status against the destination. A resource
+// the destination does not have is new; one that cannot be read at all is
+// left unknown rather than assumed absent, so a permissions or decoding
+// problem never turns into an unintended create.
+func compare(ctx context.Context, dst *bpclient.Client, item *Item) {
 	existing, err := dst.GetResource(ctx, item.Kind, item.Resource.Name())
-	if err != nil {
-		// Anything we cannot read in the destination is treated as absent;
-		// a real permissions problem surfaces on apply.
+	if errors.Is(err, bpclient.ErrNotFound) {
 		item.Status = StatusNew
-		return nil
+		return
+	}
+	if err != nil {
+		item.Status, item.Note = StatusUnknown, "could not read the destination: "+err.Error()
+		return
 	}
 	item.Existing = existing
 	cp := bpclient.Resource(deepCopy(existing))
@@ -176,7 +203,6 @@ func compare(ctx context.Context, dst *bpclient.Client, item *Item) error {
 	} else {
 		item.Status, item.Diff = StatusConflict, diff
 	}
-	return nil
 }
 
 // specDiff names the top-level spec fields that differ between two versions

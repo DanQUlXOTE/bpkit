@@ -157,6 +157,8 @@ func (m Model) viewPlan(b *strings.Builder) {
 			status = ui.Warn.Render("conflict")
 		case migrate.StatusSame:
 			status = ui.Dim.Render("identical")
+		case migrate.StatusUnknown:
+			status = ui.Bad.Render("unreadable")
 		}
 		kind := strings.TrimSuffix(string(it.Kind), "s")
 		root := " "
@@ -171,11 +173,33 @@ func (m Model) viewPlan(b *strings.Builder) {
 		b.WriteString(raw + "\n")
 	}
 	b.WriteString("\n")
-	if len(items) > 0 && items[m.itemCur].Status == migrate.StatusConflict {
-		fmt.Fprintf(b, "%s\n", ui.Dim.Render("  differs in: "+strings.Join(items[m.itemCur].Diff, ", ")+"   (d for the detail)"))
+	if len(items) > 0 {
+		switch cur := items[m.itemCur]; {
+		case cur.Status == migrate.StatusConflict:
+			fmt.Fprintf(b, "%s\n", ui.Dim.Render("  differs in: "+strings.Join(cur.Diff, ", ")+"   (d for the detail)"))
+		case cur.Note != "" && !cur.TypeDef: // a missing type is explained below
+			fmt.Fprintf(b, "%s\n", ui.Dim.Render("  "+cur.Note))
+		}
+	}
+	if n := m.missingTypes(); n > 0 {
+		fmt.Fprintf(b, "%s\n", ui.Warn.Render(fmt.Sprintf(
+			"  %d type definition(s) are missing in the destination. Bindplane seeds its built-in", n)))
+		b.WriteString(ui.Warn.Render("  types itself and a new project can still be loading them — wait and re-check before") + "\n")
+		b.WriteString(ui.Warn.Render("  copying them, since applying a built-in type over the API can fail validation.") + "\n")
 	}
 	b.WriteString(ui.Keys("space apply/skip", "o overwrite all conflicts", "d diff", "enter apply", "esc back", "q menu") + "\n")
-	b.WriteString(ui.Dim.Render("* = a configuration you picked. Conflicts and identical resources start skipped.") + "\n")
+	b.WriteString(ui.Dim.Render("* = a configuration you picked. Type definitions, conflicts and identical resources start skipped.") + "\n")
+}
+
+// missingTypes counts type definitions the destination does not have.
+func (m Model) missingTypes() int {
+	n := 0
+	for _, it := range m.plan.Items {
+		if it.TypeDef && it.Status == migrate.StatusNew {
+			n++
+		}
+	}
+	return n
 }
 
 func actionWord(it migrate.Item) string {
