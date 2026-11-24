@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"bpkit/internal/migrate"
-	"bpkit/internal/profiles"
 	"bpkit/internal/ui"
 )
 
@@ -71,7 +70,6 @@ func (m Model) viewDest(b *strings.Builder) {
 	}
 	b.WriteString("\n" + ui.Keys("up/down move", "enter choose", "esc back to menu") + "\n")
 	b.WriteString(ui.Dim.Render("Two profiles on the same server that differ only by project copy between projects.") + "\n")
-	_ = profiles.Profile{}
 }
 
 func (m Model) viewConfigs(b *strings.Builder) {
@@ -165,10 +163,10 @@ func (m Model) viewPlan(b *strings.Builder) {
 		if it.Root {
 			root = "*"
 		}
-		raw := fmt.Sprintf(" %s %s  %-13s %-36s %s", root, action, kind, ui.Trunc(it.Title(), 36), status)
+		raw := fmt.Sprintf(" %s %s  %-17s %-34s %s", root, action, kind, ui.Trunc(it.Title(), 34), status)
 		if i == m.itemCur {
-			raw = ui.Cur.Render(fmt.Sprintf(" %s %-5s  %-13s %-36s %s",
-				root, actionWord(it), kind, ui.Trunc(it.Title(), 36), it.Status.String()))
+			raw = ui.Cur.Render(fmt.Sprintf(" %s %-5s  %-17s %-34s %s",
+				root, actionWord(it), kind, ui.Trunc(it.Title(), 34), it.Status.String()))
 		}
 		b.WriteString(raw + "\n")
 	}

@@ -259,7 +259,8 @@ type walker struct {
 	warnings []string
 }
 
-// add records a resource and follows its references.
+// add records a resource, the type definition it is built on, and
+// everything it references.
 func (w *walker) add(kind bpclient.Kind, r bpclient.Resource) {
 	key := string(kind) + "/" + r.Name()
 	if r.Name() == "" || w.seen[key] {
@@ -267,22 +268,29 @@ func (w *walker) add(kind bpclient.Kind, r bpclient.Resource) {
 	}
 	w.seen[key] = true
 	w.byKind[kind] = append(w.byKind[kind], r)
-	w.follow(r.Spec())
+	spec := r.Spec()
+	if typ, _ := spec["type"].(string); typ != "" {
+		w.needType(kind, typ)
+	}
+	w.follow(spec)
 }
 
-// componentFields are the places a spec lists other resources.
+// componentFields are the places a spec lists other resources. A field
+// mapped to "" has no REST collection of its own: such components only ever
+// exist inline, so they are walked but never fetched.
 var componentFields = map[string]bpclient.Kind{
 	"sources":      bpclient.KindSource,
 	"processors":   bpclient.KindProcessor,
 	"destinations": bpclient.KindDestination,
 	"extensions":   bpclient.KindExtension,
-	"connectors":   bpclient.KindConnector,
+	"connectors":   "",
 }
 
 // follow walks a spec's component lists. A component is a reference to a
 // library resource when it names one but carries no type of its own;
 // otherwise it is defined inline and travels with its parent — though an
-// inline component can itself reference library processors.
+// inline component still needs its type definition, and can itself
+// reference library processors.
 func (w *walker) follow(spec map[string]any) {
 	if spec == nil {
 		return
@@ -297,13 +305,32 @@ func (w *walker) follow(spec map[string]any) {
 			name, _ := c["name"].(string)
 			typ, _ := c["type"].(string)
 			if name != "" && typ == "" {
-				w.fetch(kind, name)
+				if kind != "" {
+					w.fetch(kind, name)
+				}
 				continue
 			}
-			// Inline: its own processors may still be references.
+			// Inline: it carries its own definition, so only its type and
+			// any nested references need pulling in.
+			if typ != "" {
+				w.needType(kind, typ)
+			}
 			w.follow(c)
 		}
 	}
+}
+
+// needType pulls in the type definition a component of this kind is built
+// on. Without it the destination cannot render the configuration and
+// rejects the apply with "unknown DestinationType: ...".
+func (w *walker) needType(kind bpclient.Kind, typeRef string) {
+	tk := bpclient.ResourceTypeKind(kind)
+	if tk == "" {
+		return
+	}
+	// Bindplane resolves a component's type by the bare name, so a
+	// "googlecloud:3" reference and a "googlecloud" one are the same type.
+	w.fetch(tk, bpclient.TrimVersion(typeRef))
 }
 
 func (w *walker) fetch(kind bpclient.Kind, name string) {

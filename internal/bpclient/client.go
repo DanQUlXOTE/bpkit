@@ -420,12 +420,55 @@ const (
 	KindProcessor     Kind = "processors"
 	KindDestination   Kind = "destinations"
 	KindExtension     Kind = "extensions"
-	KindConnector     Kind = "connectors"
+
+	// The *Type kinds hold the definitions a resource is built on. A
+	// configuration cannot render against a server that lacks them, which
+	// is why they travel with a migration.
+	KindSourceType      Kind = "source-types"
+	KindProcessorType   Kind = "processor-types"
+	KindDestinationType Kind = "destination-types"
+	KindExtensionType   Kind = "extension-types"
 )
 
-// ResourceKinds are the kinds the migrator walks, destinations last so a
-// configuration's dependencies land before the configuration itself.
-var ResourceKinds = []Kind{KindSource, KindProcessor, KindDestination, KindExtension, KindConnector, KindConfiguration}
+// ResourceKinds are the kinds the migrator walks, in apply order: the type
+// definitions first, then the resources built on them, then the
+// configurations that reference those. Nothing is ever applied before what
+// it depends on.
+//
+// Connectors are absent on purpose: Bindplane has no /v1/connectors
+// collection, so a connector is always defined inline and travels with the
+// configuration that holds it.
+var ResourceKinds = []Kind{
+	KindSourceType, KindProcessorType, KindDestinationType, KindExtensionType,
+	KindSource, KindProcessor, KindDestination, KindExtension,
+	KindConfiguration,
+}
+
+// ResourceTypeKind is the kind holding the type definitions that resources
+// of kind k are built on, or "" when k has none.
+func ResourceTypeKind(k Kind) Kind {
+	switch k {
+	case KindSource:
+		return KindSourceType
+	case KindProcessor:
+		return KindProcessorType
+	case KindDestination:
+		return KindDestinationType
+	case KindExtension:
+		return KindExtensionType
+	}
+	return ""
+}
+
+// TrimVersion drops the ":version" suffix from a type reference such as
+// "googlecloud:3". Bindplane resolves a component's type by the bare name,
+// so that is what we fetch.
+func TrimVersion(typeRef string) string {
+	if i := strings.Index(typeRef, ":"); i >= 0 {
+		return typeRef[:i]
+	}
+	return typeRef
+}
 
 // Resource is a Bindplane resource kept as a raw map so unknown fields
 // round-trip intact through a read/apply cycle.

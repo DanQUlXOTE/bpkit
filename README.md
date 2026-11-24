@@ -145,19 +145,25 @@ written `0600`; delete it after use.
 ## Config migrator
 
 Pick a destination profile, then the configurations to copy. bpkit walks each
-one for the sources, processors, destinations, extensions and connectors it
-references and pulls those along too — components defined inline travel with
-their configuration, library resources are copied as resources in their own
-right.
+one for the sources, processors, destinations and extensions it references and
+pulls those along too — components defined inline travel with their
+configuration, library resources are copied as resources in their own right.
+
+It also carries the **type definitions** those resources are built on
+(`SourceType`, `ProcessorType`, `DestinationType`, `ExtensionType`). A project
+that lacks them rejects the apply with `unknown DestinationType: dev_null`,
+because Bindplane cannot render a configuration whose component types it does
+not know. Types that already match in the destination show as identical and
+are skipped, so this costs nothing when both projects are seeded alike.
 
 It then compares everything against the destination and reports each resource
 as **new**, **identical**, or a **conflict**. Only new resources are selected
 by default, so a plan applied without review cannot clobber anything. `space`
 toggles one, `d` shows which fields differ, `o` takes every conflict at once.
 
-Resources apply in dependency order — sources, processors, destinations,
-extensions, connectors, then configurations — so nothing references something
-that is not there yet.
+Resources apply in dependency order — type definitions, then sources,
+processors, destinations and extensions, then configurations — so nothing
+references something that is not there yet.
 
 ### Credentials
 

@@ -59,6 +59,24 @@ func newFakeBP(t *testing.T) *fakeBP {
 	return f
 }
 
+// putType registers a type definition, the way a seeded Bindplane has them.
+// collection is the REST collection, e.g. "destination-types".
+func (f *fakeBP) putType(collection, name string) {
+	f.put(collection, name, map[string]any{
+		"kind": typeKind(collection),
+		"spec": map[string]any{"parameters": []any{}},
+	})
+}
+
+// typeKind turns "destination-types" into "DestinationType".
+func typeKind(collection string) string {
+	var b strings.Builder
+	for _, word := range strings.Split(strings.TrimSuffix(collection, "s"), "-") {
+		b.WriteString(strings.ToUpper(word[:1]) + word[1:])
+	}
+	return b.String()
+}
+
 func (f *fakeBP) put(kind, name string, res map[string]any) {
 	meta, _ := res["metadata"].(map[string]any)
 	if meta == nil {
@@ -119,6 +137,9 @@ func TestBuildFollowsReferences(t *testing.T) {
 		},
 	})
 	src.put("processors", "proc1", map[string]any{"kind": "Processor", "spec": map[string]any{"type": "batch"}})
+	src.putType("source-types", "windows_event")
+	src.putType("source-types", "otlp")
+	src.putType("processor-types", "batch")
 
 	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"cfg1"})
 	if err != nil {
@@ -133,16 +154,20 @@ func TestBuildFollowsReferences(t *testing.T) {
 		got[it.Title()] = it.Kind
 	}
 	for name, want := range map[string]bpclient.Kind{
-		"cfg1":  bpclient.KindConfiguration,
-		"src1":  bpclient.KindSource,
-		"proc1": bpclient.KindProcessor,
+		"cfg1":          bpclient.KindConfiguration,
+		"src1":          bpclient.KindSource,
+		"proc1":         bpclient.KindProcessor,
+		"windows_event": bpclient.KindSourceType,
+		"otlp":          bpclient.KindSourceType,
+		"batch":         bpclient.KindProcessorType,
 	} {
 		if got[name] != want {
 			t.Fatalf("%s: kind %q, want %q (items %+v)", name, got[name], want, got)
 		}
 	}
-	if len(p.Items) != 3 {
-		t.Fatalf("want 3 items (the inline source travels with its config), got %d", len(p.Items))
+	// 3 resources plus the 3 type definitions they are built on.
+	if len(p.Items) != 6 {
+		t.Fatalf("want 6 items, got %d: %+v", len(p.Items), got)
 	}
 
 	// Dependencies must be ordered before the configuration that needs them.
@@ -158,7 +183,7 @@ func TestBuildFollowsReferences(t *testing.T) {
 
 	// Everything is new in an empty destination, so everything applies.
 	apply, skip, conflict := p.Counts()
-	if apply != 3 || skip != 0 || conflict != 0 {
+	if apply != 6 || skip != 0 || conflict != 0 {
 		t.Fatalf("counts: apply=%d skip=%d conflict=%d", apply, skip, conflict)
 	}
 	// Server-assigned identity must not travel.
@@ -220,6 +245,8 @@ func TestSecretsAreFoundAndWrittenBack(t *testing.T) {
 		"kind": "Destination",
 		"spec": map[string]any{"type": "s3", "parameters": []any{param("secret_key", SensitivePlaceholder)}},
 	})
+	src.putType("destination-types", "splunk")
+	src.putType("destination-types", "s3")
 	// Reference the destination from the configuration.
 	cfg := src.res["configurations/cfg"]
 	cfg["spec"].(map[string]any)["destinations"] = []any{ref("dest1")}
@@ -267,14 +294,15 @@ func TestApplyOrdersKindsAndSkips(t *testing.T) {
 	src, dst := newFakeBP(t), newFakeBP(t)
 	src.put("configurations", "cfg", config("cfg", ref("src1")))
 	src.put("sources", "src1", map[string]any{"kind": "Source", "spec": map[string]any{"type": "otlp"}})
+	src.putType("source-types", "otlp")
 
 	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"cfg"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Skip the source; only the configuration should be sent.
+	// Skip the source and its type; only the configuration should be sent.
 	for i := range p.Items {
-		if p.Items[i].Kind == bpclient.KindSource {
+		if p.Items[i].Kind != bpclient.KindConfiguration {
 			p.Items[i].Skip = true
 		}
 	}
@@ -346,5 +374,99 @@ func TestNoProjectNoHeader(t *testing.T) {
 		if h != "" {
 			t.Fatalf("header sent without a project: %q", h)
 		}
+	}
+}
+
+// A library destination is built on a DestinationType. If that type is
+// missing in the destination project the apply fails with
+// "unknown DestinationType: dev_null", so the type must travel too — and
+// must be applied before the destination that needs it.
+func TestLibraryResourceTypesTravel(t *testing.T) {
+	src, dst := newFakeBP(t), newFakeBP(t)
+	cfg := config("Dan Demo")
+	cfg["spec"].(map[string]any)["destinations"] = []any{
+		ref("devnull"), ref("GoogleCloud"), ref("NFR"),
+	}
+	src.put("configurations", "Dan Demo", cfg)
+	for name, typ := range map[string]string{
+		"devnull":     "dev_null",
+		"GoogleCloud": "googlecloud",
+		"NFR":         "chronicle:2", // a pinned version still resolves by bare name
+	} {
+		src.put("destinations", name, map[string]any{
+			"kind": "Destination",
+			"spec": map[string]any{"type": typ},
+		})
+	}
+	src.putType("destination-types", "dev_null")
+	src.putType("destination-types", "googlecloud")
+	src.putType("destination-types", "chronicle")
+
+	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"Dan Demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Warnings) != 0 {
+		t.Fatalf("warnings: %v", p.Warnings)
+	}
+
+	types := map[string]bool{}
+	for _, it := range p.Items {
+		if it.Kind == bpclient.KindDestinationType {
+			types[it.Title()] = true
+		}
+	}
+	for _, want := range []string{"dev_null", "googlecloud", "chronicle"} {
+		if !types[want] {
+			t.Fatalf("DestinationType %q did not travel; got %v", want, types)
+		}
+	}
+
+	if _, err := p.Apply(context.Background(), dst.client(t, "")); err != nil {
+		t.Fatal(err)
+	}
+	// Types must land in an earlier batch than the destinations using them.
+	typeBatch, destBatch := -1, -1
+	for i, batch := range dst.applied {
+		for _, r := range batch {
+			switch bpclient.Resource(r).Kind() {
+			case "DestinationType":
+				if typeBatch < 0 {
+					typeBatch = i
+				}
+			case "Destination":
+				if destBatch < 0 {
+					destBatch = i
+				}
+			}
+		}
+	}
+	if typeBatch < 0 || destBatch < 0 {
+		t.Fatalf("batches: type=%d dest=%d (%d batches)", typeBatch, destBatch, len(dst.applied))
+	}
+	if typeBatch >= destBatch {
+		t.Fatalf("types must apply before the destinations that need them: type batch %d, destination batch %d", typeBatch, destBatch)
+	}
+}
+
+// A connector has no /v1/connectors collection, so it must be walked for
+// its type rather than fetched as a library resource.
+func TestConnectorsAreNotFetched(t *testing.T) {
+	src, dst := newFakeBP(t), newFakeBP(t)
+	cfg := config("cfg")
+	cfg["spec"].(map[string]any)["connectors"] = []any{
+		map[string]any{"name": "c-inline", "type": "routing"},
+	}
+	src.put("configurations", "cfg", cfg)
+
+	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Warnings) != 0 {
+		t.Fatalf("a connector must not be fetched as a library resource: %v", p.Warnings)
+	}
+	if len(p.Items) != 1 {
+		t.Fatalf("only the configuration should travel, got %d items", len(p.Items))
 	}
 }
