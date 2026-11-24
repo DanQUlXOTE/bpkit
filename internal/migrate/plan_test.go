@@ -420,7 +420,8 @@ func TestLibraryResourceTypesTravel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(p.Warnings) != 0 {
+	// The one warning is the chronicle:2 pin being dropped.
+	if len(p.Warnings) != 1 || !strings.Contains(p.Warnings[0], "chronicle:2") {
 		t.Fatalf("warnings: %v", p.Warnings)
 	}
 
@@ -670,5 +671,60 @@ func TestPinnedNameNeverBecomesTheResourceName(t *testing.T) {
 		if strings.Contains(it.Resource.Name(), ":") {
 			t.Fatalf("resource name carries a version pin: %q", it.Resource.Name())
 		}
+	}
+}
+
+// A component's type is pinned the same way a library reference is, and the
+// render path resolves it exactly (model/configuration.go:3092). A seeded
+// type sits at whatever version the destination server built, so a pinned
+// type fails there with "unknown SourceType: tcp:9".
+func TestTypeVersionPinsAreStripped(t *testing.T) {
+	src, dst := newFakeBP(t), newFakeBP(t)
+	cfg := config("cfg", inline("tcp:9"), inline("file_v2:19"))
+	src.put("configurations", "cfg", cfg)
+	// A library source pins its type too.
+	cfg["spec"].(map[string]any)["sources"] = append(
+		cfg["spec"].(map[string]any)["sources"].([]any), ref("lib1"))
+	src.put("sources", "lib1", map[string]any{
+		"kind": "Source", "spec": map[string]any{"type": "otlp:4"},
+	})
+	for _, n := range []string{"tcp", "file_v2", "otlp"} {
+		src.put("source-types", n, map[string]any{
+			"kind": "SourceType", "spec": map[string]any{"parameters": []any{}}})
+	}
+
+	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No applied resource may carry a pinned type.
+	for i := range p.Items {
+		p.Items[i].Skip = false
+	}
+	if _, err := p.Apply(context.Background(), dst.client(t, "")); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(dst.applied)
+	for _, bad := range []string{"tcp:9", "file_v2:19", "otlp:4"} {
+		if strings.Contains(string(body), bad) {
+			t.Fatalf("pinned type %q was applied: %s", bad, body)
+		}
+	}
+	for _, want := range []string{`"tcp"`, `"file_v2"`, `"otlp"`} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("type %s missing after unpinning: %s", want, body)
+		}
+	}
+
+	// Each dropped pin is reported.
+	pins := 0
+	for _, w := range p.Warnings {
+		if strings.Contains(w, "type ") && strings.Contains(w, "current version") {
+			pins++
+		}
+	}
+	if pins != 3 {
+		t.Fatalf("want 3 type-pin warnings, got %d: %v", pins, p.Warnings)
 	}
 }

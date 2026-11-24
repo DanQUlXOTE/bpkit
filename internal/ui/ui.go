@@ -74,3 +74,71 @@ func Scroll(top, cursor, height int) int {
 func Keys(parts ...string) string {
 	return Dim.Render(strings.Join(parts, "  •  "))
 }
+
+// Wrap reflows text to fit width columns, preserving existing line breaks
+// and indenting continuation lines by two spaces so a wrapped message still
+// reads as one item. Server errors arrive as one long line, often with
+// embedded newlines and tabs from Go's multierror, so they are normalized
+// before wrapping rather than left to overflow the terminal.
+func Wrap(text string, width int) string {
+	if width < 20 {
+		width = 20
+	}
+	var out []string
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\t", " "), "\n") {
+		line = strings.TrimRight(line, " ")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		out = append(out, wrapLine(line, width)...)
+	}
+	return strings.Join(out, "\n")
+}
+
+func wrapLine(line string, width int) []string {
+	var out []string
+	cur := ""
+	flush := func() {
+		if cur != "" {
+			out = append(out, cur)
+			cur = ""
+		}
+	}
+	indent := ""
+	for _, word := range strings.Fields(line) {
+		// A single word longer than the line gets hard-broken.
+		for len([]rune(word)) > width-len(indent) {
+			room := width - len(indent) - len([]rune(cur))
+			if cur != "" {
+				room--
+			}
+			if room < 8 { // not worth splitting this tight; wrap first
+				flush()
+				cur, indent = "", "  "
+				continue
+			}
+			r := []rune(word)
+			if cur != "" {
+				cur += " "
+			}
+			cur += string(r[:room])
+			word = string(r[room:])
+			flush()
+			indent = "  "
+			cur = indent
+		}
+		add := word
+		if cur != "" && cur != indent {
+			add = " " + word
+		}
+		if len([]rune(cur))+len([]rune(add)) > width {
+			flush()
+			indent = "  "
+			cur = indent + word
+			continue
+		}
+		cur += add
+	}
+	flush()
+	return out
+}

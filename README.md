@@ -184,16 +184,25 @@ references something that is not there yet.
 
 ### Version pins
 
-A configuration references a library resource by name and version, such as
-`Aurepoll:17`. Bindplane resolves that pair exactly — unlike a component's
-type, which it resolves by bare name — so a pinned reference cannot resolve
-against a destination where the copy was just created at version 1, and the
-render fails with `unknown Source: Aurepoll:17`.
+Bindplane pins two kinds of reference to an exact version, and resolves both
+pairs exactly:
 
-The migrator therefore reads the pinned version from the source, since that is
-the content the configuration actually uses, but writes the reference bare so
-it tracks whatever version the destination assigns. Each pin it drops is
-listed in the plan's warnings.
+- a **library reference**, `Aurepoll:17`, naming a resource and version
+- a component's **type**, `tcp:9`, naming a type definition and version
+
+Neither version usually exists in the destination — a copied resource starts
+at version 1, and a seeded type sits at whatever version that server built —
+so a pin that travelled unchanged would fail to render with
+`unknown Source: Aurepoll:17` or `unknown SourceType: tcp:9`.
+
+The migrator reads the pinned version from the source, since that is the
+content the configuration actually uses, but writes every reference bare so it
+tracks the destination's current version. Each pin it drops is listed in the
+plan's warnings.
+
+The trade-off is that a migrated configuration follows the destination's
+current version rather than staying frozen, which is the only thing that can
+work across projects.
 
 ### Credentials
 

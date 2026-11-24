@@ -233,9 +233,9 @@ func (m Model) View() string {
 		fmt.Fprintf(&b, "%s %s\n", ui.Title.Render("bpkit · "+m.childMeta.Title), ui.Dim.Render(m.connLabel()))
 		b.WriteString(m.child.View())
 		if m.msg != "" {
-			b.WriteString("\n" + ui.Bad.Render(m.msg))
+			b.WriteString("\n" + ui.Bad.Render(ui.Wrap(m.msg, m.wrapW())))
 		} else if m.note != "" {
-			b.WriteString("\n" + ui.Good.Render(m.note))
+			b.WriteString("\n" + ui.Good.Render(ui.Wrap(m.note, m.wrapW())))
 		}
 		return b.String()
 	case vProfiles:
@@ -249,11 +249,19 @@ func (m Model) View() string {
 	}
 
 	if m.msg != "" {
-		b.WriteString("\n" + ui.Bad.Render(m.msg) + "\n")
+		b.WriteString("\n" + ui.Bad.Render(ui.Wrap(m.msg, m.wrapW())) + "\n")
 	} else if m.note != "" {
-		b.WriteString("\n" + ui.Good.Render(m.note) + "\n")
+		b.WriteString("\n" + ui.Good.Render(ui.Wrap(m.note, m.wrapW())) + "\n")
 	}
 	return b.String()
+}
+
+// wrapW is the width long messages reflow to, leaving a small gutter.
+func (m Model) wrapW() int {
+	if m.width <= 0 {
+		return 100
+	}
+	return max(20, m.width-2)
 }
 
 func (m Model) connLabel() string {

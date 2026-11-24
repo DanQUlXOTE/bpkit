@@ -162,7 +162,7 @@ func Build(ctx context.Context, src, dst *bpclient.Client, configNames []string)
 					meta["name"] = bpclient.TrimVersion(n)
 				}
 			}
-			p.Warnings = append(p.Warnings, unpinReferences(r.Spec(), r.Title())...)
+			p.Warnings = append(p.Warnings, unpin(r.Spec(), r.Title())...)
 			item := Item{
 				Kind:     kind,
 				Resource: r,
@@ -387,21 +387,31 @@ func (w *walker) fetch(kind bpclient.Kind, ref string) {
 	w.add(kind, r)
 }
 
-// unpinReferences rewrites a spec's library references to bare names,
-// dropping any ":version" pin, and reports each one it changed.
+// unpin rewrites a spec's version-pinned references to bare names and
+// reports each one it changed. It covers both kinds of pin:
 //
-// A reference like "Aurepoll:17" asks for that exact version of the
-// resource — Bindplane looks a library resource up by name AND version,
-// unlike a component's type, which it resolves by bare name. The
-// destination's freshly created copy is at version 1, so a pinned
-// reference cannot resolve there and the configuration fails to render
-// with "unknown Source: Aurepoll:17". A bare name resolves to the
-// destination's current version, which is the copy we just applied.
-func unpinReferences(spec map[string]any, owner string) []string {
+//   - a library reference, "Aurepoll:17", naming a resource and version
+//   - a component's type, "tcp:9", naming a type definition and version
+//
+// Bindplane resolves both pairs exactly, pin included — AsLibraryResource
+// passes rc.Name through verbatim, and the render path passes spec.type
+// through verbatim (model/configuration.go:3092). A version that exists in
+// the source project rarely exists in the destination: a copied resource
+// starts at version 1, and a seeded type sits at whatever version that
+// server built. So a pin that travels unchanged fails to resolve, with
+// "unknown Source: Aurepoll:17" or "unknown SourceType: tcp:9".
+//
+// Dropping the pin resolves to the destination's current version instead,
+// which is the copy we just applied or the type that server already has.
+func unpin(spec map[string]any, owner string) []string {
 	if spec == nil {
 		return nil
 	}
 	var out []string
+
+	// The resource's own type, for a library resource.
+	out = append(out, unpinType(spec, owner)...)
+
 	for field := range componentFields {
 		list, _ := spec[field].([]any)
 		for _, e := range list {
@@ -418,11 +428,25 @@ func unpinReferences(spec map[string]any, owner string) []string {
 				}
 				continue
 			}
-			// Inline components can hold references of their own.
-			out = append(out, unpinReferences(c, owner)...)
+			// Inline: unpin its type, then its own nested references.
+			out = append(out, unpin(c, owner)...)
 		}
 	}
 	return out
+}
+
+// unpinType drops a ":version" pin from a spec's own type reference.
+func unpinType(spec map[string]any, owner string) []string {
+	typ, _ := spec["type"].(string)
+	if typ == "" {
+		return nil
+	}
+	bare := bpclient.TrimVersion(typ)
+	if bare == typ {
+		return nil
+	}
+	spec["type"] = bare
+	return []string{fmt.Sprintf("%s: type %q now tracks the destination's current version", owner, typ)}
 }
 
 // ------------------------------------------------------- secret detection

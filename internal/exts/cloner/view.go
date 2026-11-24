@@ -33,9 +33,9 @@ func (m Model) View() string {
 		b.WriteString(ui.Keys("n start over", "q back to menu") + "\n")
 	}
 	if m.msg != "" {
-		b.WriteString("\n" + ui.Bad.Render(m.msg) + "\n")
+		b.WriteString("\n" + ui.Bad.Render(ui.Wrap(m.msg, max(20, m.width-2))) + "\n")
 	} else if m.note != "" {
-		b.WriteString("\n" + ui.Good.Render(m.note) + "\n")
+		b.WriteString("\n" + ui.Good.Render(ui.Wrap(m.note, max(20, m.width-2))) + "\n")
 	}
 	return b.String()
 }

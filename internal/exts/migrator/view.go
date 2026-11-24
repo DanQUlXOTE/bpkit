@@ -35,9 +35,9 @@ func (m Model) View() string {
 	}
 
 	if m.msg != "" {
-		b.WriteString("\n" + ui.Bad.Render(m.msg) + "\n")
+		b.WriteString("\n" + ui.Bad.Render(ui.Wrap(m.msg, m.wrapW())) + "\n")
 	} else if m.note != "" {
-		b.WriteString("\n" + ui.Good.Render(m.note) + "\n")
+		b.WriteString("\n" + ui.Good.Render(ui.Wrap(m.note, m.wrapW())) + "\n")
 	}
 	return b.String()
 }
@@ -137,7 +137,7 @@ func (m Model) viewPlan(b *strings.Builder) {
 		ui.Dim.Render(fmt.Sprintf("%d to apply, %d skipped, %d conflict(s)", apply, skip, conflict)))
 
 	for _, w := range m.plan.Warnings {
-		b.WriteString(ui.Warn.Render("  "+w) + "\n")
+		b.WriteString(ui.Warn.Render(ui.Wrap("  "+w, m.wrapW())) + "\n")
 	}
 	if len(m.plan.Warnings) > 0 {
 		b.WriteString("\n")
@@ -189,6 +189,14 @@ func (m Model) viewPlan(b *strings.Builder) {
 	}
 	b.WriteString(ui.Keys("space apply/skip", "o overwrite all conflicts", "d diff", "enter apply", "esc back", "q menu") + "\n")
 	b.WriteString(ui.Dim.Render("* = a configuration you picked. Type definitions, conflicts and identical resources start skipped.") + "\n")
+}
+
+// wrapW is the width long messages reflow to, leaving a small gutter.
+func (m Model) wrapW() int {
+	if m.width <= 0 {
+		return 100
+	}
+	return max(20, m.width-2)
 }
 
 // missingTypes counts type definitions the destination does not have.
@@ -268,7 +276,11 @@ func (m Model) viewConfirm(b *strings.Builder) {
 func (m Model) viewDone(b *strings.Builder) {
 	for _, r := range m.results {
 		if r.Err != nil {
-			fmt.Fprintf(b, "%s %d %s: %v\n", ui.Bad.Render("FAILED"), r.Count, r.Kind, r.Err)
+			fmt.Fprintf(b, "%s %d %s:\n", ui.Bad.Render("FAILED"), r.Count, r.Kind)
+			for _, line := range strings.Split(ui.Wrap(r.Err.Error(), m.wrapW()-2), "\n") {
+				b.WriteString("  " + ui.Bad.Render(line) + "\n")
+			}
+			b.WriteString("\n")
 			continue
 		}
 		fmt.Fprintf(b, "%s %d %s\n", ui.Good.Render("OK    "), r.Count, r.Kind)
