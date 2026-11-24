@@ -5,6 +5,7 @@
 package profiles
 
 import (
+	"bpkit/internal/bpclient"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,7 +23,31 @@ type Profile struct {
 	// X-Bindplane-Account-ID header. A key scoped to several projects
 	// requires it; a key that carries its own project does not.
 	Project string `json:"project,omitempty"`
+	// Proxy and CACert belong to the profile rather than the environment
+	// so two connections can differ: the migrator holds a source and a
+	// destination at once, and only one of them may sit behind a proxy.
+	Proxy   string `json:"proxy,omitempty"`
+	CACert  string `json:"caCert,omitempty"`
 	SkipTLS bool   `json:"skipTLSVerify,omitempty"`
+}
+
+// ClientOptions is how to connect with this profile. Every caller that
+// opens a connection goes through here, so a field added to Profile cannot
+// be forgotten at one of them.
+func (p Profile) ClientOptions() bpclient.Options {
+	return bpclient.Options{
+		BaseURL:       p.Server,
+		APIKey:        p.APIKey,
+		Project:       p.Project,
+		Proxy:         p.Proxy,
+		CACert:        p.CACert,
+		SkipTLSVerify: p.SkipTLS,
+	}
+}
+
+// Connect opens a connection with this profile.
+func (p Profile) Connect() (*bpclient.Client, error) {
+	return bpclient.New(p.ClientOptions())
 }
 
 // Title is the profile as shown in a list: its name, plus the project when
@@ -188,6 +213,7 @@ func validate(p Profile) error {
 func (s *Store) Save(oldName string, p Profile) error {
 	p.Name, p.Server = strings.TrimSpace(p.Name), strings.TrimSpace(p.Server)
 	p.APIKey, p.Project = strings.TrimSpace(p.APIKey), strings.TrimSpace(p.Project)
+	p.Proxy, p.CACert = strings.TrimSpace(p.Proxy), strings.TrimSpace(p.CACert)
 	if err := validate(p); err != nil {
 		return err
 	}

@@ -118,9 +118,7 @@ func migrateDestination(store *profiles.Store, active profiles.Profile, src *bpc
 		if strings.EqualFold(p.Name, active.Name) && p.Project == active.Project {
 			return nil, "", fmt.Errorf("the destination must differ from the source")
 		}
-		c, err := bpclient.New(bpclient.Options{
-			BaseURL: p.Server, APIKey: p.APIKey, Project: p.Project, SkipTLSVerify: p.SkipTLS,
-		})
+		c, err := p.Connect()
 		return c, p.Title(), err
 
 	case o.toProject != "":

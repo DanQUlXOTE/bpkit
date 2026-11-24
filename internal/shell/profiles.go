@@ -149,13 +149,20 @@ func (m Model) viewProfiles(b *strings.Builder) {
 // form is the add/edit profile form. Field order matches the display.
 type form struct {
 	name, server, key, project textinput.Model
+	proxy, caCert              textinput.Model
 	skipTLS                    bool
 	focus                      int
 	idx                        int // index being edited, -1 when adding
 	editing                    bool
 }
 
-const formFields = 5 // name, server, key, project, skipTLS
+// inputs is the form's text lines, in display order. The toggle sits after
+// them, so it is field index len(inputs).
+func (f *form) inputs() []*textinput.Model {
+	return []*textinput.Model{&f.name, &f.server, &f.key, &f.project, &f.proxy, &f.caCert}
+}
+
+const formFields = 7 // the six text lines, then skipTLS
 
 func newForm() form {
 	mk := func(ph string) textinput.Model {
@@ -169,6 +176,8 @@ func newForm() form {
 		server:  mk(DefaultServer),
 		key:     mk("Bindplane API key"),
 		project: mk("optional; required for a key scoped to several projects"),
+		proxy:   mk("optional; e.g. http://proxy.corp:8080 (default: $HTTPS_PROXY)"),
+		caCert:  mk("optional; PEM file for a TLS-inspecting proxy"),
 		idx:     -1,
 	}
 	f.server.SetValue(DefaultServer)
@@ -186,6 +195,8 @@ func (m Model) openForm(idx int) (tea.Model, tea.Cmd) {
 		m.form.name.SetValue(p.Name)
 		m.form.server.SetValue(p.Server)
 		m.form.project.SetValue(p.Project)
+		m.form.proxy.SetValue(p.Proxy)
+		m.form.caCert.SetValue(p.CACert)
 		m.form.key.Placeholder = "(unchanged: " + profiles.Mask(p.APIKey) + ")"
 		m.form.skipTLS = p.SkipTLS
 	}
@@ -195,22 +206,12 @@ func (m Model) openForm(idx int) (tea.Model, tea.Cmd) {
 
 func (m *Model) formEdit(on bool) {
 	m.form.editing = on
-	m.form.name.Blur()
-	m.form.server.Blur()
-	m.form.key.Blur()
-	m.form.project.Blur()
-	if !on {
-		return
+	inputs := m.form.inputs()
+	for _, in := range inputs {
+		in.Blur()
 	}
-	switch m.form.focus {
-	case 0:
-		m.form.name.Focus()
-	case 1:
-		m.form.server.Focus()
-	case 2:
-		m.form.key.Focus()
-	case 3:
-		m.form.project.Focus()
+	if on && m.form.focus < len(inputs) {
+		inputs[m.form.focus].Focus()
 	}
 }
 
@@ -222,6 +223,8 @@ func (m Model) formProfile() (old string, p profiles.Profile) {
 		Server:  m.form.server.Value(),
 		APIKey:  m.form.key.Value(),
 		Project: m.form.project.Value(),
+		Proxy:   m.form.proxy.Value(),
+		CACert:  m.form.caCert.Value(),
 		SkipTLS: m.form.skipTLS,
 	}
 	if m.form.idx >= 0 {
@@ -240,17 +243,12 @@ func (m Model) updateForm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.formEdit(false)
 			return m, nil
 		}
-		var cmd tea.Cmd
-		switch m.form.focus {
-		case 0:
-			m.form.name, cmd = m.form.name.Update(k)
-		case 1:
-			m.form.server, cmd = m.form.server.Update(k)
-		case 2:
-			m.form.key, cmd = m.form.key.Update(k)
-		default:
-			m.form.project, cmd = m.form.project.Update(k)
+		inputs := m.form.inputs()
+		if m.form.focus >= len(inputs) {
+			return m, nil
 		}
+		updated, cmd := inputs[m.form.focus].Update(k)
+		*inputs[m.form.focus] = updated
 		return m, cmd
 	}
 	switch k.String() {
@@ -300,10 +298,9 @@ func (m Model) updateForm(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func formClient(p profiles.Profile) (*bpclient.Client, error) {
-	return bpclient.New(bpclient.Options{
-		BaseURL: p.Server, APIKey: p.APIKey, Project: p.Project,
-		SkipTLSVerify: p.SkipTLS, Timeout: 15 * time.Second,
-	})
+	o := p.ClientOptions()
+	o.Timeout = 15 * time.Second
+	return bpclient.New(o)
 }
 
 func (m Model) viewForm(b *strings.Builder) {
@@ -328,8 +325,11 @@ func (m Model) viewForm(b *strings.Builder) {
 	fmt.Fprintf(b, "%sServer:      %s\n", mark[1], m.form.server.View())
 	fmt.Fprintf(b, "%sAPI key:     %s\n", mark[2], m.form.key.View())
 	fmt.Fprintf(b, "%sProject:     %s\n", mark[3], m.form.project.View())
-	fmt.Fprintf(b, "%sSkip TLS:    %s\n\n", mark[4], tls)
-	b.WriteString(ui.Dim.Render("Project is sent as X-Bindplane-Account-ID. Leave it empty for a key that already\ncarries its own project; set it for a key scoped to several.") + "\n\n")
+	fmt.Fprintf(b, "%sProxy:       %s\n", mark[4], m.form.proxy.View())
+	fmt.Fprintf(b, "%sCA cert:     %s\n", mark[5], m.form.caCert.View())
+	fmt.Fprintf(b, "%sSkip TLS:    %s\n\n", mark[6], tls)
+	b.WriteString(ui.Dim.Render("Project is sent as X-Bindplane-Account-ID. Leave it empty for a key that already\ncarries its own project; set it for a key scoped to several.") + "\n")
+	b.WriteString(ui.Dim.Render("Proxy and CA cert are per profile, so one connection can go through a proxy and\nanother not. Empty proxy means $HTTPS_PROXY. Give a CA cert when a proxy\nterminates TLS, instead of turning verification off.") + "\n\n")
 	if m.form.editing {
 		b.WriteString(ui.Dim.Render("INPUT  enter/esc done") + "\n")
 	} else {

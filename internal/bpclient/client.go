@@ -7,12 +7,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -36,11 +38,20 @@ type Client struct {
 }
 
 type Options struct {
-	BaseURL       string
-	APIKey        string
-	User          string
-	Pass          string
-	Project       string // optional; sent as X-Bindplane-Account-ID
+	BaseURL string
+	APIKey  string
+	User    string
+	Pass    string
+	Project string // optional; sent as X-Bindplane-Account-ID
+	// Proxy is an explicit proxy URL, e.g. http://proxy.corp:8080 or
+	// http://user:pass@proxy.corp:8080. Empty means read HTTP_PROXY,
+	// HTTPS_PROXY and NO_PROXY from the environment, which is the default
+	// and covers most setups.
+	Proxy string
+	// CACert is a PEM file of extra certificate authorities to trust, for
+	// a proxy that terminates TLS and presents its own certificate. They
+	// are added to the system roots rather than replacing them.
+	CACert        string
 	SkipTLSVerify bool
 	Timeout       time.Duration
 }
@@ -55,9 +66,24 @@ func New(opts Options) (*Client, error) {
 	if opts.Timeout == 0 {
 		opts.Timeout = 60 * time.Second
 	}
+	// An explicit proxy wins; otherwise fall back to the environment, so
+	// HTTPS_PROXY keeps working for anyone already relying on it.
 	tr := &http.Transport{Proxy: http.ProxyFromEnvironment}
+	if p := strings.TrimSpace(opts.Proxy); p != "" {
+		u, err := parseProxy(p)
+		if err != nil {
+			return nil, err
+		}
+		tr.Proxy = http.ProxyURL(u)
+	}
 	if opts.SkipTLSVerify {
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	} else if ca := strings.TrimSpace(opts.CACert); ca != "" {
+		pool, err := caPool(ca)
+		if err != nil {
+			return nil, err
+		}
+		tr.TLSClientConfig = &tls.Config{RootCAs: pool}
 	}
 	base := strings.TrimRight(opts.BaseURL, "/")
 	if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
@@ -86,6 +112,43 @@ func (c *Client) WithProject(project string) *Client {
 	cp := *c
 	cp.project = strings.TrimSpace(project)
 	return &cp
+}
+
+// parseProxy accepts a proxy with or without a scheme, defaulting to http,
+// which is what a proxy URL almost always is.
+func parseProxy(raw string) (*url.URL, error) {
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("proxy %q: %w", raw, err)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("proxy %q: no host", raw)
+	}
+	return u, nil
+}
+
+// caPool returns the system roots plus the authorities in the given PEM
+// file. A TLS-terminating proxy signs with its own CA, so without this the
+// handshake fails with "certificate signed by unknown authority" and the
+// only other way through is turning verification off entirely.
+func caPool(path string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("CA certificate: %w", err)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		// No system roots to build on (Windows before Go 1.18, or a
+		// stripped container): trust only what was given.
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("CA certificate %s: no certificates found; it should be PEM encoded", path)
+	}
+	return pool, nil
 }
 
 func (c *Client) do(req *http.Request) (int, []byte, error) {

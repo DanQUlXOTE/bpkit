@@ -86,14 +86,7 @@ func (m Model) context() ext.Context {
 	}
 }
 
-func dial(p profiles.Profile) (*bpclient.Client, error) {
-	return bpclient.New(bpclient.Options{
-		BaseURL:       p.Server,
-		APIKey:        p.APIKey,
-		Project:       p.Project,
-		SkipTLSVerify: p.SkipTLS,
-	})
-}
+func dial(p profiles.Profile) (*bpclient.Client, error) { return p.Connect() }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {

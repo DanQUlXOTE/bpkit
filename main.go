@@ -40,6 +40,7 @@ func run() error {
 	var (
 		server, csvPath, query, selector, profileName    string
 		collectorVersion, apiKeyEnv, user, pass, project string
+		proxy, caCert                                    string
 		apply, skipTLS                                   bool
 	)
 	flag.StringVar(&server, "server", os.Getenv("BINDPLANE_URL"), "Bindplane server URL (env: $BINDPLANE_URL). Passing --server explicitly overrides the default profile")
@@ -48,7 +49,9 @@ func run() error {
 	flag.StringVar(&apiKeyEnv, "api-key-env", "BINDPLANE_API_KEY", "Env var holding the Bindplane API key")
 	flag.StringVar(&user, "user", os.Getenv("BINDPLANE_USER"), "Basic-auth username (alternative to API key)")
 	flag.StringVar(&pass, "pass", os.Getenv("BINDPLANE_PASSWORD"), "Basic-auth password")
-	flag.BoolVar(&skipTLS, "skip-tls-verify", false, "Skip TLS certificate verification (lab only)")
+	flag.StringVar(&proxy, "proxy", "", "Proxy URL, e.g. http://proxy.corp:8080 (default: $HTTPS_PROXY/$HTTP_PROXY, honouring $NO_PROXY)")
+	flag.StringVar(&caCert, "ca-cert", "", "PEM file of extra certificate authorities to trust, for a proxy that terminates TLS")
+	flag.BoolVar(&skipTLS, "skip-tls-verify", false, "Skip TLS certificate verification (lab only; prefer --ca-cert)")
 
 	flag.StringVar(&query, "query", "", "Labeler: initial collector query, e.g. os:linux")
 	flag.StringVar(&selector, "selector", "", "Labeler: initial label selector, e.g. env=prod")
@@ -92,12 +95,15 @@ func run() error {
 	flagCreds := false
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
-		case "server", "user", "pass", "api-key-env", "project":
+		case "server", "user", "pass", "api-key-env", "project", "proxy", "ca-cert":
 			flagCreds = true
 		}
 	})
 	store, active, client, err := connect(profileName, flagCreds,
-		profiles.Profile{Server: server, APIKey: os.Getenv(apiKeyEnv), Project: project, SkipTLS: skipTLS},
+		profiles.Profile{
+			Server: server, APIKey: os.Getenv(apiKeyEnv), Project: project,
+			Proxy: proxy, CACert: caCert, SkipTLS: skipTLS,
+		},
 		user, pass)
 	if err != nil {
 		return err
@@ -238,18 +244,13 @@ func connect(profileName string, flagCreds bool, creds profiles.Profile, user, p
 	} else if profileName != "" {
 		return nil, profiles.Profile{}, nil, err
 	}
-	fromProfile := func(p profiles.Profile) (*bpclient.Client, error) {
-		return bpclient.New(bpclient.Options{
-			BaseURL: p.Server, APIKey: p.APIKey, Project: p.Project, SkipTLSVerify: p.SkipTLS,
-		})
-	}
+	fromProfile := func(p profiles.Profile) (*bpclient.Client, error) { return p.Connect() }
 	fromCreds := func() (*profiles.Store, profiles.Profile, *bpclient.Client, error) {
 		p := creds
 		p.Name = "environment"
-		c, err := bpclient.New(bpclient.Options{
-			BaseURL: p.Server, APIKey: p.APIKey, User: user, Pass: pass,
-			Project: p.Project, SkipTLSVerify: p.SkipTLS,
-		})
+		o := p.ClientOptions()
+		o.User, o.Pass = user, pass
+		c, err := bpclient.New(o)
 		return store, p, c, err
 	}
 	haveCreds := creds.Server != "" && (creds.APIKey != "" || user != "")

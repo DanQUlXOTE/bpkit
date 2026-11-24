@@ -93,6 +93,39 @@ The connection is chosen in this order:
 3. The saved default profile (`s` in the profile manager sets it)
 4. `$BINDPLANE_URL` + `$BINDPLANE_API_KEY` from the environment
 
+### Proxies and TLS inspection
+
+API calls go through a proxy by default: with no proxy set on the profile,
+bpkit reads `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` from the environment,
+the way every Go program does. If that is all you need, nothing has to be
+configured.
+
+Set a proxy on the profile, or with `--proxy`, when the environment cannot
+carry it — most usefully because **the migrator holds two connections at
+once**, and environment variables are global, so they cannot send the source
+through a proxy and the destination direct. A proxy may include credentials,
+`http://user:pass@proxy.corp:8080`, and is stored in the same `0600` file as
+the API key. An explicit proxy overrides the environment.
+
+A proxy that **terminates TLS** — Zscaler, Netskope and friends — presents its
+own certificate, and the request fails with:
+
+```
+x509: certificate signed by unknown authority
+```
+
+Point `--ca-cert` (or the profile's CA cert field) at that proxy's CA in PEM
+form. It is added to the system roots rather than replacing them, so
+everything else still verifies normally. Prefer this to `--skip-tls-verify`,
+which turns verification off altogether and is for labs only.
+
+```bash
+bpkit --proxy http://proxy.corp:8080 --ca-cert /etc/ssl/corp-ca.pem
+```
+
+A CA file that is missing or is not PEM is an error, rather than quietly
+falling back to the system roots and failing later with a confusing message.
+
 ### Projects
 
 Bindplane scopes a request to a project with the `X-Bindplane-Account-ID`
