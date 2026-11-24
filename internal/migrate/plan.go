@@ -171,14 +171,12 @@ func Build(ctx context.Context, src, dst *bpclient.Client, configNames []string)
 			}
 			item.TypeDef = bpclient.IsResourceTypeKind(kind)
 			compare(ctx, dst, &item)
-			// Only brand-new resources apply by default, and never a type
-			// definition: those are the server's to seed, and applying one
-			// over the JSON API trips a Bindplane bug where an int
-			// parameter default arrives as a float and template validation
-			// rejects it.
-			item.Skip = item.Status != StatusNew || item.TypeDef
+			// Only brand-new resources apply by default. That includes a
+			// missing type definition: the resources built on it cannot
+			// render without it, so skipping one only moves the failure.
+			item.Skip = item.Status != StatusNew
 			if item.TypeDef && item.Status == StatusNew {
-				item.Note = "missing in the destination — built-in types are seeded by the server"
+				item.Note = "missing in the destination — normally the server seeds this itself"
 			}
 			if item.Status == StatusUnknown {
 				p.Warnings = append(p.Warnings, fmt.Sprintf("%s %q: %s", strings.TrimSuffix(string(kind), "s"), item.Title(), item.Note))
@@ -311,6 +309,36 @@ type Result struct {
 	Kind  bpclient.Kind
 	Count int
 	Err   error
+}
+
+// Explain turns a known server-side failure into something actionable,
+// returning "" when there is nothing useful to add.
+func (r Result) Explain() string {
+	if r.Err == nil {
+		return ""
+	}
+	msg := r.Err.Error()
+	switch {
+	case strings.Contains(msg, "incompatible types for comparison: float64 and int"),
+		strings.Contains(msg, "incompatible types for comparison: int and float64"):
+		return "This is a Bindplane bug, not a problem with the copy. A type's int " +
+			"parameter default arrives as a float over the JSON API, and the apply-time " +
+			"validation does not convert it back the way rendering does. Built-in types " +
+			"are normally seeded by the server, so the fix is to let the destination " +
+			"finish seeding rather than to copy this type."
+	case strings.Contains(msg, "unknown ProcessorType"),
+		strings.Contains(msg, "unknown SourceType"),
+		strings.Contains(msg, "unknown DestinationType"),
+		strings.Contains(msg, "unknown ExtensionType"):
+		return "The destination has no such type definition. Go back and include the " +
+			"matching type in the plan, then apply again."
+	case strings.Contains(msg, "unknown Source"),
+		strings.Contains(msg, "unknown Destination"),
+		strings.Contains(msg, "unknown Processor"):
+		return "The destination has no such resource. It was probably skipped in the " +
+			"plan; include it and apply again."
+	}
+	return ""
 }
 
 // ------------------------------------------------------- dependency walk

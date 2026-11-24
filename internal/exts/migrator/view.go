@@ -183,12 +183,12 @@ func (m Model) viewPlan(b *strings.Builder) {
 	}
 	if n := m.missingTypes(); n > 0 {
 		fmt.Fprintf(b, "%s\n", ui.Warn.Render(fmt.Sprintf(
-			"  %d type definition(s) are missing in the destination. Bindplane seeds its built-in", n)))
-		b.WriteString(ui.Warn.Render("  types itself and a new project can still be loading them — wait and re-check before") + "\n")
-		b.WriteString(ui.Warn.Render("  copying them, since applying a built-in type over the API can fail validation.") + "\n")
+			"  %d type definition(s) are missing in the destination and will be copied, since", n)))
+		b.WriteString(ui.Warn.Render("  nothing built on them renders without. Bindplane normally seeds these itself, so if") + "\n")
+		b.WriteString(ui.Warn.Render("  the destination is new, letting it finish seeding is the cleaner fix.") + "\n")
 	}
 	b.WriteString(ui.Keys("space apply/skip", "o overwrite all conflicts", "d diff", "enter apply", "esc back", "q menu") + "\n")
-	b.WriteString(ui.Dim.Render("* = a configuration you picked. Type definitions, conflicts and identical resources start skipped.") + "\n")
+	b.WriteString(ui.Dim.Render("* = a configuration you picked. Conflicts and identical resources start skipped.") + "\n")
 }
 
 // wrapW is the width long messages reflow to, leaving a small gutter.
@@ -279,6 +279,12 @@ func (m Model) viewDone(b *strings.Builder) {
 			fmt.Fprintf(b, "%s %d %s:\n", ui.Bad.Render("FAILED"), r.Count, r.Kind)
 			for _, line := range strings.Split(ui.Wrap(r.Err.Error(), m.wrapW()-2), "\n") {
 				b.WriteString("  " + ui.Bad.Render(line) + "\n")
+			}
+			if why := r.Explain(); why != "" {
+				b.WriteString("\n")
+				for _, line := range strings.Split(ui.Wrap(why, m.wrapW()-2), "\n") {
+					b.WriteString("  " + ui.Dim.Render(line) + "\n")
+				}
 			}
 			b.WriteString("\n")
 			continue

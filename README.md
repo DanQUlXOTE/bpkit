@@ -155,12 +155,14 @@ that lacks them rejects the apply with `unknown DestinationType: dev_null`,
 because Bindplane cannot render a configuration whose component types it does
 not know.
 
-Type definitions always start **skipped**, because they are the server's to
-provide: Bindplane seeds its built-in library itself, and a freshly created
-project can still be loading it. If the plan reports missing types, the usual
-answer is to wait for the destination to finish seeding and re-run. Applying a
-built-in type over the REST API can also fail validation outright, with an
-error like:
+A type the destination already has is left alone. A type it lacks is copied,
+because nothing built on that type renders without it — skipping one only
+moves the failure from the type to the resource using it.
+
+Bindplane normally seeds its built-in type library itself, so if the plan
+reports missing types and the destination project is new, letting it finish
+seeding is the cleaner fix. Copying a built-in type over the REST API can also
+fail validation outright, with an error like:
 
 ```
 template: logs.receivers:22:10: executing "logs.receivers" at <gt .initial_lookback 0>:
@@ -170,8 +172,8 @@ template: logs.receivers:22:10: executing "logs.receivers" at <gt .initial_lookb
 That is a Bindplane server bug, not something the client can work around: JSON
 has no integer type, so an `int` parameter default arrives as a float, and the
 apply-time validation path does not normalize it the way the render path does.
-You can still opt a type in with `space` — useful for a type you authored
-yourself — but expect built-ins to fail.
+bpkit recognizes that error and says so in the results. You can always exclude
+a resource from the plan with `space`.
 
 It then compares everything against the destination and reports each resource
 as **new**, **identical**, or a **conflict**. Only new resources are selected

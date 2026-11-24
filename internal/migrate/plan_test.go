@@ -3,6 +3,7 @@ package migrate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -186,18 +187,16 @@ func TestBuildFollowsReferences(t *testing.T) {
 		t.Fatalf("configuration must come last, found at %d of %d", cfgAt, len(p.Items))
 	}
 
-	// The 3 resources apply; the 3 type definitions are the server's to
-	// seed and start skipped.
+	// Everything is new in an empty destination, so everything applies —
+	// including the type definitions, since nothing built on them renders
+	// without.
 	apply, skip, conflict := p.Counts()
-	if apply != 3 || skip != 3 || conflict != 0 {
+	if apply != 6 || skip != 0 || conflict != 0 {
 		t.Fatalf("counts: apply=%d skip=%d conflict=%d", apply, skip, conflict)
 	}
 	for _, it := range p.Items {
 		if it.TypeDef != bpclient.IsResourceTypeKind(it.Kind) {
 			t.Fatalf("%s: TypeDef=%v for kind %s", it.Title(), it.TypeDef, it.Kind)
-		}
-		if it.TypeDef && !it.Skip {
-			t.Fatalf("type definition %q must start skipped", it.Title())
 		}
 	}
 	// Server-assigned identity must not travel.
@@ -437,21 +436,17 @@ func TestLibraryResourceTypesTravel(t *testing.T) {
 		}
 	}
 
-	// They start skipped, because the server seeds its own built-in types
-	// and applying one over the JSON API can fail validation.
+	// A type the destination lacks must be applied: the destinations built
+	// on it cannot render without it. The user is told it was missing.
 	for _, it := range p.Items {
-		if it.TypeDef && !it.Skip {
-			t.Fatalf("type %q must start skipped", it.Title())
+		if it.TypeDef && it.Skip {
+			t.Fatalf("missing type %q must be applied, not skipped", it.Title())
 		}
 		if it.TypeDef && it.Note == "" {
-			t.Fatalf("type %q should explain why it is skipped", it.Title())
+			t.Fatalf("type %q should say it was missing in the destination", it.Title())
 		}
 	}
 
-	// Opting in applies them, ahead of the destinations that need them.
-	for i := range p.Items {
-		p.Items[i].Skip = false
-	}
 	if _, err := p.Apply(context.Background(), dst.client(t, "")); err != nil {
 		t.Fatal(err)
 	}
@@ -811,5 +806,53 @@ func TestUnpinWarningsAreDeduplicated(t *testing.T) {
 	}
 	if len(p.Warnings) != 2 {
 		t.Fatalf("want one warning per distinct pin, got %d: %v", len(p.Warnings), p.Warnings)
+	}
+}
+
+// A type the destination already has needs nothing done, so it stays
+// skipped and does not risk overwriting the server's own copy.
+func TestPresentTypeIsSkipped(t *testing.T) {
+	src, dst := newFakeBP(t), newFakeBP(t)
+	src.put("configurations", "cfg", config("cfg", inline("tcp")))
+	src.putType("source-types", "tcp")
+	dst.putType("source-types", "tcp")
+
+	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range p.Items {
+		if !it.TypeDef {
+			continue
+		}
+		if it.Status != StatusSame || !it.Skip {
+			t.Fatalf("type %q: status=%v skip=%v, want identical and skipped", it.Title(), it.Status, it.Skip)
+		}
+	}
+}
+
+// A failure the server is known for should come with an explanation the
+// user can act on.
+func TestResultExplainsKnownFailures(t *testing.T) {
+	cases := []struct {
+		err  string
+		want string
+	}{
+		{`executing "logs.receivers" at <gt .initial_lookback 0>: error calling gt: ` +
+			`incompatible types for comparison: float64 and int`, "Bindplane bug"},
+		{"unknown ProcessorType: parse_timestamp", "no such type definition"},
+		{"unknown Source: Aurepoll", "no such resource"},
+	}
+	for _, c := range cases {
+		got := Result{Err: errors.New(c.err)}.Explain()
+		if !strings.Contains(got, c.want) {
+			t.Fatalf("Explain(%q) = %q, want it to mention %q", c.err, got, c.want)
+		}
+	}
+	if got := (Result{}).Explain(); got != "" {
+		t.Fatalf("a success needs no explanation, got %q", got)
+	}
+	if got := (Result{Err: errors.New("connection refused")}).Explain(); got != "" {
+		t.Fatalf("an unrecognized error needs no invented explanation, got %q", got)
 	}
 }
