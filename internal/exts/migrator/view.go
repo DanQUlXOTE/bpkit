@@ -93,7 +93,7 @@ func (m Model) viewConfigs(b *strings.Builder) {
 }
 
 func (m Model) viewSecrets(b *strings.Builder) {
-	secs := m.plan.Secrets
+	secs := m.plan.Pending()
 	left := len(m.plan.Unfilled())
 	fmt.Fprintf(b, "%s  %s\n\n",
 		ui.Title.Render("Credentials"),

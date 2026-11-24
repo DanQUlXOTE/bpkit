@@ -235,8 +235,12 @@ Bindplane never discloses a sensitive parameter: it reads back as
 `(sensitive)`. The migrator finds every one of them before applying and asks
 you for the real value, naming the resource and parameter.
 
-Fill them in. A resource whose credential is still unset is **refused
-outright** — Bindplane rejects the `(sensitive)` placeholder with "has masked
+Only resources the plan is actually applying are asked about — a credential on
+a destination the target already has is never sent, so bpkit does not ask for
+it.
+
+Fill in the ones it does ask for. A resource whose credential is still unset is
+**refused outright** — Bindplane rejects the `(sensitive)` placeholder with "has masked
 (sensitive) values that cannot be restored" — so leaving one blank does not
 produce a half-configured resource, it produces none at all, and every
 configuration referencing it then fails too. The plan says how many are unset

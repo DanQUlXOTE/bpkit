@@ -1238,3 +1238,42 @@ func TestRealTypeDifferenceStillConflicts(t *testing.T) {
 		}
 	}
 }
+
+// A credential on a resource the destination already has is never sent, so
+// asking for it is noise. Only secrets on resources being applied are
+// pending.
+func TestOnlySecretsOnAppliedResourcesArePending(t *testing.T) {
+	src, dst := newFakeBP(t), newFakeBP(t)
+	cfg := config("cfg")
+	cfg["spec"].(map[string]any)["destinations"] = []any{ref("present"), ref("missing")}
+	src.put("configurations", "cfg", cfg)
+	for _, n := range []string{"present", "missing"} {
+		src.put("destinations", n, map[string]any{
+			"kind": "Destination",
+			"spec": map[string]any{"type": "s3", "parameters": []any{param("token", SensitivePlaceholder)}},
+		})
+	}
+	// The destination already holds an identical copy of "present".
+	dst.put("destinations", "present", map[string]any{
+		"kind": "Destination",
+		"spec": map[string]any{"type": "s3", "parameters": []any{param("token", SensitivePlaceholder)}},
+	})
+
+	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Secrets) != 2 {
+		t.Fatalf("both secrets should be found, got %d", len(p.Secrets))
+	}
+	pending := p.Pending()
+	if len(pending) != 1 {
+		t.Fatalf("only the applied resource's secret is pending, got %d: %+v", len(pending), pending)
+	}
+	if !strings.Contains(pending[0].Where, "missing") {
+		t.Fatalf("wrong secret pending: %s", pending[0].Where)
+	}
+	if len(p.Unfilled()) != 1 {
+		t.Fatalf("unfilled should follow pending, got %d", len(p.Unfilled()))
+	}
+}

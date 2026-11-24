@@ -5,7 +5,11 @@ package migrate
 // stopping at the first, which is what Plan.Apply does.
 //
 // Run with:
-//	BPKIT_LIVE=1 BPKIT_SRC_PROJECT= BPKIT_DST_PROJECT=<id> go test ./internal/migrate/ -run TestLiveProbe -v -timeout 60m
+//	BPKIT_LIVE=1 BPKIT_KEY=<key> BPKIT_SRC_PROJECT= BPKIT_DST_PROJECT=<id> \
+//	  go test ./internal/migrate/ -run TestLiveProbe -v -timeout 60m
+//
+// BPKIT_CONFIGS=a,b narrows it to named configurations; BPKIT_APPLY=1 makes
+// it write. Without BPKIT_APPLY it only reports what a migration would do.
 
 import (
 	"context"
@@ -45,18 +49,28 @@ func TestLiveProbe(t *testing.T) {
 	ctx := context.Background()
 	src, dst := liveClients(t)
 
-	configs, err := src.ListResources(ctx, bpclient.KindConfiguration)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var names []string
-	for _, c := range configs {
-		if n := c.Name(); n != "" {
-			names = append(names, n)
+	if only := os.Getenv("BPKIT_CONFIGS"); only != "" {
+		// Narrow to named configurations, for testing one migration.
+		for _, n := range strings.Split(only, ",") {
+			if n = strings.TrimSpace(n); n != "" {
+				names = append(names, n)
+			}
 		}
+		t.Logf("migrating %d named configuration(s)", len(names))
+	} else {
+		configs, err := src.ListResources(ctx, bpclient.KindConfiguration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range configs {
+			if n := c.Name(); n != "" {
+				names = append(names, n)
+			}
+		}
+		sort.Strings(names)
+		t.Logf("source holds %d configurations", len(names))
 	}
-	sort.Strings(names)
-	t.Logf("source holds %d configurations", len(names))
 
 	start := time.Now()
 	p, err := Build(ctx, src, dst, names)
@@ -119,11 +133,11 @@ func TestLiveProbe(t *testing.T) {
 		}
 	}
 
-	if len(p.Secrets) > 0 {
-		t.Logf("--- %d credentials the source would not disclose (left unset) ---", len(p.Secrets))
-		for i, s := range p.Secrets {
+	if pending := p.Pending(); len(pending) > 0 {
+		t.Logf("--- %d credential(s) needed by resources being applied ---", len(pending))
+		for i, s := range pending {
 			if i == 8 {
-				t.Logf("      ... %d more", len(p.Secrets)-8)
+				t.Logf("      ... %d more", len(pending)-8)
 				break
 			}
 			t.Logf("      %s → %s", s.Where, s.Param)

@@ -166,7 +166,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.plan, m.msg = msg.plan, ""
 		m.itemCur, m.itemTop, m.secCur = 0, 0, 0
-		if len(m.plan.Secrets) > 0 {
+		if len(m.plan.Pending()) > 0 {
 			m.stage = stSecrets
 			m.secInput.SetValue("")
 		} else {
@@ -303,7 +303,7 @@ func (m Model) updateConfigs(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 // ------------------------------------------------------- fill the secrets
 
 func (m Model) updateSecrets(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	secs := m.plan.Secrets
+	secs := m.plan.Pending()
 	if m.editing {
 		switch k.String() {
 		case "esc":
@@ -363,7 +363,7 @@ func (m Model) updatePlan(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	items := m.plan.Items
 	switch k.String() {
 	case "esc":
-		if len(m.plan.Secrets) > 0 {
+		if len(m.plan.Pending()) > 0 {
 			m.stage = stSecrets
 		} else {
 			m.stage = stConfigs

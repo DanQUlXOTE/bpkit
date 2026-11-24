@@ -88,6 +88,9 @@ type Secret struct {
 	Param string
 	Value string
 	param map[string]any
+	// item indexes the resource this parameter belongs to, so a secret on
+	// a resource nobody is applying can be left alone.
+	item int
 }
 
 // Set fills in the parameter.
@@ -121,10 +124,23 @@ func (p *Plan) Counts() (apply, skip, conflict int) {
 	return
 }
 
-// Unfilled returns the secrets still waiting for a value.
-func (p *Plan) Unfilled() []*Secret {
+// Pending returns the secrets that actually matter: those on a resource the
+// plan is going to apply. A credential on a resource the destination already
+// has is never sent, so asking for it is noise.
+func (p *Plan) Pending() []*Secret {
 	var out []*Secret
 	for _, s := range p.Secrets {
+		if s.item >= 0 && s.item < len(p.Items) && !p.Items[s.item].Skip {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// Unfilled returns the pending secrets still waiting for a value.
+func (p *Plan) Unfilled() []*Secret {
+	var out []*Secret
+	for _, s := range p.Pending() {
 		if !s.Filled() {
 			out = append(out, s)
 		}
@@ -648,9 +664,13 @@ func unpinType(spec map[string]any, owner string) []string {
 // user can supply the real values before anything is applied.
 func findSecrets(items []Item) []*Secret {
 	var out []*Secret
-	for _, it := range items {
+	for i, it := range items {
 		label := fmt.Sprintf("%s %q", strings.TrimSuffix(string(it.Kind), "s"), it.Title())
-		out = append(out, scanParams(it.Resource.Spec(), label)...)
+		found := scanParams(it.Resource.Spec(), label)
+		for _, s := range found {
+			s.item = i
+		}
+		out = append(out, found...)
 	}
 	return out
 }
