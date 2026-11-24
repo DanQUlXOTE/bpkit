@@ -288,6 +288,16 @@ func forDiff(r bpclient.Resource) bpclient.Resource {
 			meta["name"] = bpclient.TrimVersion(n)
 		}
 	}
+	if spec := cp.Spec(); spec != nil {
+		// featureGate records where the server got a type from, not what it
+		// is: the seeder stamps "base-sources" on a built-in
+		// (store/store_helpers.go:734) and the apply endpoint stamps
+		// "custom-resource-types" on anything sent over REST
+		// (rest/api.go:3287). Copying a built-in type therefore changes its
+		// provenance in the destination, and comparing the two would report
+		// every type bpkit has migrated as a conflict against itself.
+		delete(spec, "featureGate")
+	}
 	unpin(cp.Spec(), "")
 	return cp
 }
@@ -313,8 +323,14 @@ func jsonEqual(a, b any) bool {
 	return string(x) == string(y)
 }
 
-// Apply writes the plan's unskipped items to the destination, one kind at a
-// time so dependencies land before the configurations that reference them.
+// Apply writes the plan's unskipped items to the destination, one kind at
+// a time so dependencies land before the resources that reference them.
+//
+// Bindplane rejects an apply whole, so one bad resource would otherwise
+// cost every sibling in its batch. When a batch fails, each resource is
+// retried on its own and the failures are retried once more, in case one
+// only failed because a sibling had not landed yet. Everything that can
+// apply does, and every resource that cannot is reported by name.
 func (p *Plan) Apply(ctx context.Context, dst *bpclient.Client) ([]Result, error) {
 	byKind := map[bpclient.Kind][]bpclient.Resource{}
 	for _, it := range p.Items {
@@ -323,37 +339,83 @@ func (p *Plan) Apply(ctx context.Context, dst *bpclient.Client) ([]Result, error
 		}
 		byKind[it.Kind] = append(byKind[it.Kind], it.Resource)
 	}
+
 	var out []Result
+	var failed bool
 	for _, kind := range bpclient.ResourceKinds {
 		rs := byKind[kind]
 		if len(rs) == 0 {
 			continue
 		}
-		_, err := dst.Apply(ctx, rs)
-		out = append(out, Result{Kind: kind, Count: len(rs), Err: err})
-		if err != nil {
-			// A failed kind means later kinds would reference what is not
-			// there, so stop rather than pile failures on failures.
-			return out, err
+		res := Result{Kind: kind, Count: len(rs)}
+		if _, err := dst.Apply(ctx, rs); err == nil {
+			res.Applied = len(rs)
+			out = append(out, res)
+			continue
 		}
+		res.Applied, res.Failures = applyIndividually(ctx, dst, rs)
+		if len(res.Failures) > 0 {
+			failed = true
+		}
+		out = append(out, res)
+	}
+	if failed {
+		return out, fmt.Errorf("some resources could not be applied")
 	}
 	return out, nil
 }
 
-// Result is what applying one kind did.
-type Result struct {
-	Kind  bpclient.Kind
-	Count int
+// applyIndividually applies each resource on its own, then retries the
+// failures once so a resource that only needed a sibling to land first is
+// not reported as broken.
+func applyIndividually(ctx context.Context, dst *bpclient.Client, rs []bpclient.Resource) (applied int, failures []Failure) {
+	var pending []bpclient.Resource
+	errOf := map[string]error{}
+	for _, r := range rs {
+		if _, err := dst.Apply(ctx, []bpclient.Resource{r}); err != nil {
+			pending = append(pending, r)
+			errOf[r.Name()] = err
+			continue
+		}
+		applied++
+	}
+	for _, r := range pending {
+		if _, err := dst.Apply(ctx, []bpclient.Resource{r}); err != nil {
+			failures = append(failures, Failure{Title: r.Title(), Err: err})
+			continue
+		}
+		applied++
+	}
+	return applied, failures
+}
+
+// Failure is one resource the destination refused.
+type Failure struct {
+	Title string
 	Err   error
 }
 
+// Result is what applying one kind did.
+type Result struct {
+	Kind bpclient.Kind
+	// Count is how many resources of this kind the plan tried to apply,
+	// Applied how many landed.
+	Count   int
+	Applied int
+	// Failures names the resources the destination refused, with its reason.
+	Failures []Failure
+}
+
+// OK reports whether every resource of this kind applied.
+func (r Result) OK() bool { return len(r.Failures) == 0 }
+
 // Explain turns a known server-side failure into something actionable,
 // returning "" when there is nothing useful to add.
-func (r Result) Explain() string {
-	if r.Err == nil {
+func (f Failure) Explain() string {
+	if f.Err == nil {
 		return ""
 	}
-	msg := r.Err.Error()
+	msg := f.Err.Error()
 	switch {
 	case strings.Contains(msg, "incompatible types for comparison: float64 and int"),
 		strings.Contains(msg, "incompatible types for comparison: int and float64"):
@@ -373,6 +435,11 @@ func (r Result) Explain() string {
 		strings.Contains(msg, "unknown Processor"):
 		return "The destination has no such resource. It was probably skipped in the " +
 			"plan; include it and apply again."
+	case strings.Contains(msg, "masked (sensitive) values that cannot be restored"):
+		return "Bindplane will not accept the \"(sensitive)\" placeholder the source hands " +
+			"out in place of a credential. Go back to the credentials screen and enter a " +
+			"real value for this resource, or exclude it from the plan — leaving it unset " +
+			"does not create a half-configured resource, it creates none at all."
 	case strings.Contains(msg, "parameter value for"):
 		return "The copy is faithful: this is the value stored in the source being " +
 			"rejected by the destination. Bindplane validates on save, not on read, so a " +

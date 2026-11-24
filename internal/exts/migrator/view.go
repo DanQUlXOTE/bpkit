@@ -98,7 +98,9 @@ func (m Model) viewSecrets(b *strings.Builder) {
 	fmt.Fprintf(b, "%s  %s\n\n",
 		ui.Title.Render("Credentials"),
 		ui.Dim.Render(fmt.Sprintf("%d of %d still unset", left, len(secs))))
-	b.WriteString(ui.Dim.Render("Bindplane never discloses these values, so they arrive as \"(sensitive)\".\nType the real value for each, or continue and fix them in the destination.") + "\n\n")
+	b.WriteString(ui.Dim.Render("Bindplane never discloses these values, so they arrive as \"(sensitive)\".") + "\n")
+	b.WriteString(ui.Warn.Render("A resource left unset is refused outright, not half-configured — enter a real") + "\n")
+	b.WriteString(ui.Warn.Render("value for each, or exclude that resource from the plan on the next screen.") + "\n\n")
 
 	end := min(len(secs), m.listH())
 	top := max(0, min(m.secCur-end/2, len(secs)-end))
@@ -267,7 +269,8 @@ func (m Model) viewConfirm(b *strings.Builder) {
 		}
 	}
 	if n := len(m.plan.Unfilled()); n > 0 {
-		fmt.Fprintf(b, "  %s\n", ui.Warn.Render(fmt.Sprintf("%d credential(s) are still unset.", n)))
+		fmt.Fprintf(b, "  %s\n", ui.Bad.Render(fmt.Sprintf(
+			"%d credential(s) are still unset; those resources will be refused.", n)))
 	}
 	b.WriteString("\n  " + m.confirm.View() + "\n\n")
 	b.WriteString(ui.Keys("type confirm then enter", "esc back") + "\n")
@@ -275,24 +278,68 @@ func (m Model) viewConfirm(b *strings.Builder) {
 
 func (m Model) viewDone(b *strings.Builder) {
 	for _, r := range m.results {
-		if r.Err != nil {
-			fmt.Fprintf(b, "%s %d %s:\n", ui.Bad.Render("FAILED"), r.Count, r.Kind)
-			for _, line := range strings.Split(ui.Wrap(r.Err.Error(), m.wrapW()-2), "\n") {
-				b.WriteString("  " + ui.Bad.Render(line) + "\n")
-			}
-			if why := r.Explain(); why != "" {
-				b.WriteString("\n")
-				for _, line := range strings.Split(ui.Wrap(why, m.wrapW()-2), "\n") {
-					b.WriteString("  " + ui.Dim.Render(line) + "\n")
-				}
-			}
-			b.WriteString("\n")
+		if r.OK() {
+			fmt.Fprintf(b, "%s %d %s\n", ui.Good.Render("OK     "), r.Applied, r.Kind)
 			continue
 		}
-		fmt.Fprintf(b, "%s %d %s\n", ui.Good.Render("OK    "), r.Count, r.Kind)
+		fmt.Fprintf(b, "%s %d of %d %s\n",
+			ui.Warn.Render("PARTIAL"), r.Applied, r.Count, r.Kind)
 	}
-	if len(m.results) == 0 && m.msg == "" {
-		b.WriteString(ui.Dim.Render("nothing applied") + "\n")
+
+	var failures []migrate.Failure
+	for _, r := range m.results {
+		failures = append(failures, r.Failures...)
 	}
-	b.WriteString("\n" + ui.Keys("q back to menu") + "\n")
+	if len(failures) == 0 {
+		if len(m.results) == 0 {
+			b.WriteString(ui.Dim.Render("nothing applied") + "\n")
+		}
+		b.WriteString("\n" + ui.Keys("q back to menu") + "\n")
+		return
+	}
+
+	fmt.Fprintf(b, "\n%s\n\n", ui.Bad.Render(fmt.Sprintf("%d resource(s) were refused:", len(failures))))
+
+	// Group by reason, so one cause repeated across resources reads once.
+	type group struct {
+		why   string
+		who   []string
+		first migrate.Failure
+	}
+	var groups []*group
+	for _, f := range failures {
+		reason := f.Err.Error()
+		var g *group
+		for _, c := range groups {
+			if c.first.Err.Error() == reason {
+				g = c
+			}
+		}
+		if g == nil {
+			g = &group{why: reason, first: f}
+			groups = append(groups, g)
+		}
+		g.who = append(g.who, f.Title)
+	}
+
+	h := max(6, m.height-10)
+	shown := 0
+	for _, g := range groups {
+		if shown >= h {
+			fmt.Fprintf(b, "%s\n", ui.Dim.Render(fmt.Sprintf("  ... %d more reason(s); scroll back or re-run", len(groups)-shown)))
+			break
+		}
+		b.WriteString("  " + ui.Bad.Render(ui.Trunc(strings.Join(g.who, ", "), m.wrapW()-4)) + "\n")
+		for _, line := range strings.Split(ui.Wrap(g.why, m.wrapW()-4), "\n") {
+			b.WriteString("    " + ui.Dim.Render(line) + "\n")
+		}
+		if why := g.first.Explain(); why != "" {
+			for _, line := range strings.Split(ui.Wrap(why, m.wrapW()-4), "\n") {
+				b.WriteString("    " + ui.Warn.Render(line) + "\n")
+			}
+		}
+		b.WriteString("\n")
+		shown++
+	}
+	b.WriteString(ui.Keys("q back to menu") + "\n")
 }

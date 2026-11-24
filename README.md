@@ -159,6 +159,12 @@ A type the destination already has is left alone. A type it lacks is copied,
 because nothing built on that type renders without it — skipping one only
 moves the failure from the type to the resource using it.
 
+Copying a built-in type does change its provenance: Bindplane stamps anything
+applied over the REST API as a custom resource type, where a seeded built-in
+is marked as a base one. bpkit ignores that stamp when comparing, so a second
+run still reports the type as identical rather than as a conflict against
+itself.
+
 Bindplane normally seeds its built-in type library itself, so if the plan
 reports missing types and the destination project is new, letting it finish
 seeding is the cleaner fix. Copying a built-in type over the REST API can also
@@ -183,6 +189,12 @@ toggles one, `d` shows which fields differ, `o` takes every conflict at once.
 Resources apply in dependency order — type definitions, then sources,
 processors, destinations and extensions, then configurations — so nothing
 references something that is not there yet.
+
+Bindplane rejects an apply whole, so one bad resource would cost every sibling
+in its batch. When a batch fails, bpkit retries each resource on its own, and
+retries the failures once more in case one only failed because a sibling had
+not landed yet. Everything that can apply does, and the results name each
+resource that could not, with the reason and what to do about it.
 
 ### Version pins
 
@@ -221,9 +233,14 @@ work across projects.
 
 Bindplane never discloses a sensitive parameter: it reads back as
 `(sensitive)`. The migrator finds every one of them before applying and asks
-you for the real value, naming the resource and parameter. You can skip them
-and fix the destination afterwards, but the plan tells you how many are
-unset before you confirm.
+you for the real value, naming the resource and parameter.
+
+Fill them in. A resource whose credential is still unset is **refused
+outright** — Bindplane rejects the `(sensitive)` placeholder with "has masked
+(sensitive) values that cannot be restored" — so leaving one blank does not
+produce a half-configured resource, it produces none at all, and every
+configuration referencing it then fails too. The plan says how many are unset
+before you confirm.
 
 ## Adding a tool
 

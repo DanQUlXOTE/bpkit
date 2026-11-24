@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -323,7 +324,7 @@ func TestApplyOrdersKindsAndSkips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res) != 1 || res[0].Kind != bpclient.KindConfiguration {
+	if len(res) != 1 || res[0].Kind != bpclient.KindConfiguration || res[0].Applied != 1 {
 		t.Fatalf("results: %+v", res)
 	}
 	if len(dst.applied) != 1 || len(dst.applied[0]) != 1 {
@@ -844,17 +845,19 @@ func TestResultExplainsKnownFailures(t *testing.T) {
 		{"unknown Source: Aurepoll", "no such resource"},
 		{"dest-0: 1 error occurred: * parameter value for 'custom_url' Enter only the base OTLP endpoint",
 			"faithful"},
+		{"splunk: Destination splunk has masked (sensitive) values that cannot be restored, enter the sensitive values again",
+			"credentials screen"},
 	}
 	for _, c := range cases {
-		got := Result{Err: errors.New(c.err)}.Explain()
+		got := Failure{Err: errors.New(c.err)}.Explain()
 		if !strings.Contains(got, c.want) {
 			t.Fatalf("Explain(%q) = %q, want it to mention %q", c.err, got, c.want)
 		}
 	}
-	if got := (Result{}).Explain(); got != "" {
+	if got := (Failure{}).Explain(); got != "" {
 		t.Fatalf("a success needs no explanation, got %q", got)
 	}
-	if got := (Result{Err: errors.New("connection refused")}).Explain(); got != "" {
+	if got := (Failure{Err: errors.New("connection refused")}).Explain(); got != "" {
 		t.Fatalf("an unrecognized error needs no invented explanation, got %q", got)
 	}
 }
@@ -1041,6 +1044,197 @@ func TestNoSurvivingPinWarningWhenClean(t *testing.T) {
 	for _, w := range p.Warnings {
 		if strings.Contains(w, "please report") {
 			t.Fatalf("false positive: %q", w)
+		}
+	}
+}
+
+// bodyNames returns the metadata.name of each resource in an apply body,
+// so a fixture can refuse one resource without also refusing whatever
+// merely mentions it.
+func bodyNames(r *http.Request) map[string]bool {
+	var body struct {
+		Resources []map[string]any `json:"resources"`
+	}
+	raw, _ := io.ReadAll(r.Body)
+	json.Unmarshal(raw, &body)
+	out := map[string]bool{}
+	for _, res := range body.Resources {
+		meta, _ := res["metadata"].(map[string]any)
+		if n, _ := meta["name"].(string); n != "" {
+			out[n] = true
+		}
+	}
+	return out
+}
+
+// Bindplane rejects an apply whole, so one bad resource must not cost its
+// siblings. The batch fails, each resource is retried alone, and only the
+// genuinely broken one is reported.
+func TestOneBadResourceDoesNotBlockItsSiblings(t *testing.T) {
+	src := newFakeBP(t)
+	src.put("configurations", "cfg", config("cfg"))
+	cfgSpec := src.res["configurations/cfg"]["spec"].(map[string]any)
+	cfgSpec["destinations"] = []any{ref("good1"), ref("bad"), ref("good2")}
+	for _, n := range []string{"good1", "bad", "good2"} {
+		src.put("destinations", n, map[string]any{"kind": "Destination", "spec": map[string]any{"type": "s3"}})
+	}
+
+	// A destination that refuses any apply mentioning "bad".
+	var applies int
+	dstSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/apply" {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		applies++
+		if bodyNames(r)["bad"] {
+			http.Error(w, `{"errors":["bad: nope"]}`, http.StatusBadRequest)
+			return
+		}
+		w.Write([]byte(`{"updates":[]}`))
+	}))
+	defer dstSrv.Close()
+	dst, err := bpclient.New(bpclient.Options{BaseURL: dstSrv.URL, APIKey: "k"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := Build(context.Background(), src.client(t, ""), dst, []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, applyErr := p.Apply(context.Background(), dst)
+	if applyErr == nil {
+		t.Fatal("a refused resource must still be reported as a failure")
+	}
+
+	var dests Result
+	for _, r := range res {
+		if r.Kind == bpclient.KindDestination {
+			dests = r
+		}
+	}
+	if dests.Count != 3 || dests.Applied != 2 {
+		t.Fatalf("want 2 of 3 destinations applied, got %d of %d", dests.Applied, dests.Count)
+	}
+	if len(dests.Failures) != 1 || dests.Failures[0].Title != "bad" {
+		t.Fatalf("failures: %+v", dests.Failures)
+	}
+	if dests.OK() {
+		t.Fatal("OK() must be false when something failed")
+	}
+	// The configuration still applied, since it is a separate kind.
+	for _, r := range res {
+		if r.Kind == bpclient.KindConfiguration && r.Applied != 1 {
+			t.Fatalf("configuration: %+v", r)
+		}
+	}
+	_ = applies
+}
+
+// A resource that failed only because a sibling had not landed yet gets a
+// second chance before being called broken.
+func TestOrderingFailureIsRetriedOnce(t *testing.T) {
+	src := newFakeBP(t)
+	src.put("configurations", "cfg", config("cfg"))
+	src.res["configurations/cfg"]["spec"].(map[string]any)["processors"] = []any{ref("first"), ref("second")}
+	for _, n := range []string{"first", "second"} {
+		src.put("processors", n, map[string]any{"kind": "Processor", "spec": map[string]any{"type": "batch"}})
+	}
+
+	// "first" is refused until "second" has been applied.
+	seenSecond := false
+	dstSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/apply" {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		names := bodyNames(r)
+		if names["second"] {
+			seenSecond = true
+			w.Write([]byte(`{"updates":[]}`))
+			return
+		}
+		if names["first"] && !seenSecond {
+			http.Error(w, `{"errors":["first: needs second"]}`, http.StatusBadRequest)
+			return
+		}
+		w.Write([]byte(`{"updates":[]}`))
+	}))
+	defer dstSrv.Close()
+	dst, err := bpclient.New(bpclient.Options{BaseURL: dstSrv.URL, APIKey: "k"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := Build(context.Background(), src.client(t, ""), dst, []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, _ := p.Apply(context.Background(), dst)
+	for _, r := range res {
+		if r.Kind != bpclient.KindProcessor {
+			continue
+		}
+		if r.Applied != 2 || len(r.Failures) != 0 {
+			t.Fatalf("the retry should have rescued it: %d applied, failures %+v", r.Applied, r.Failures)
+		}
+	}
+}
+
+// A type copied by bpkit is stamped "custom-resource-types" by the apply
+// endpoint, while the source's built-in copy says "base-sources". That is
+// provenance, not substance, so it must not read as a conflict on a second
+// run.
+func TestFeatureGateIsNotAConflict(t *testing.T) {
+	src, dst := newFakeBP(t), newFakeBP(t)
+	src.put("configurations", "cfg", config("cfg", inline("tcp")))
+	src.put("source-types", "tcp", map[string]any{
+		"kind": "SourceType",
+		"spec": map[string]any{"featureGate": "base-sources", "parameters": []any{}},
+	})
+	dst.put("source-types", "tcp", map[string]any{
+		"kind": "SourceType",
+		"spec": map[string]any{"featureGate": "custom-resource-types", "parameters": []any{}},
+	})
+
+	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range p.Items {
+		if !it.TypeDef {
+			continue
+		}
+		if it.Status != StatusSame {
+			t.Fatalf("featureGate alone must not conflict: status=%v diff=%v", it.Status, it.Diff)
+		}
+	}
+}
+
+// A type that differs in substance must still conflict.
+func TestRealTypeDifferenceStillConflicts(t *testing.T) {
+	src, dst := newFakeBP(t), newFakeBP(t)
+	src.put("configurations", "cfg", config("cfg", inline("tcp")))
+	src.put("source-types", "tcp", map[string]any{
+		"kind": "SourceType",
+		"spec": map[string]any{"featureGate": "base-sources", "parameters": []any{param("port", 514)}},
+	})
+	dst.put("source-types", "tcp", map[string]any{
+		"kind": "SourceType",
+		"spec": map[string]any{"featureGate": "custom-resource-types", "parameters": []any{param("port", 601)}},
+	})
+
+	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range p.Items {
+		if !it.TypeDef {
+			continue
+		}
+		if it.Status != StatusConflict || len(it.Diff) != 1 || it.Diff[0] != "parameters" {
+			t.Fatalf("status=%v diff=%v, want a conflict on parameters", it.Status, it.Diff)
 		}
 	}
 }

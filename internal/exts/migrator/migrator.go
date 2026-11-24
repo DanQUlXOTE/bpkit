@@ -350,7 +350,7 @@ func (m Model) updateSecrets(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Continue, leaving the rest unset.
 		m.stage, m.note = stPlan, ""
 		if n := len(m.plan.Unfilled()); n > 0 {
-			m.note = fmt.Sprintf("%d credential(s) left unset — those resources will need fixing in the destination", n)
+			m.msg = fmt.Sprintf("%d credential(s) left unset — Bindplane refuses those resources outright, so exclude them or go back and fill them in", n)
 		}
 	}
 	return m, nil
