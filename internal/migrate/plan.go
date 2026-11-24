@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -185,7 +186,42 @@ func Build(ctx context.Context, src, dst *bpclient.Client, configNames []string)
 		}
 	}
 	p.Secrets = findSecrets(p.Items)
+	p.Warnings = appendUnique(p.Warnings, survivingPins(p.Items)...)
 	return p, nil
+}
+
+// pinnedKey matches a "name" or "type" field whose value still carries a
+// ":<version>" suffix.
+var pinnedKey = regexp.MustCompile(`"(?:name|type)"\s*:\s*"([^"]+:\d+)"`)
+
+// survivingPins reports version pins left anywhere in what is about to be
+// applied. Everything unpin understands is already bare, so a hit means a
+// resource shape it does not yet traverse — a pin that reaches the
+// destination fails to resolve there, with "unknown ProcessorType:
+// google_filter_regex:15" or similar. Reporting beats silently rewriting
+// something whose structure we do not actually understand.
+func survivingPins(items []Item) []string {
+	var out []string
+	for _, it := range items {
+		if it.Skip {
+			continue
+		}
+		data, err := json.Marshal(map[string]any(it.Resource))
+		if err != nil {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, m := range pinnedKey.FindAllStringSubmatch(string(data), -1) {
+			if seen[m[1]] {
+				continue
+			}
+			seen[m[1]] = true
+			out = append(out, fmt.Sprintf(
+				"%s still pins %q — bpkit could not reach it, so the destination may reject this; please report the shape",
+				it.Title(), m[1]))
+		}
+	}
+	return out
 }
 
 // compare fills in the item's status against the destination. A resource
@@ -379,38 +415,74 @@ var componentFields = map[string]bpclient.Kind{
 	"connectors":   "",
 }
 
-// follow walks a spec's component lists. A component is a reference to a
-// library resource when it names one but carries no type of its own;
-// otherwise it is defined inline and travels with its parent — though an
-// inline component still needs its type definition, and can itself
-// reference library processors.
-func (w *walker) follow(spec map[string]any) {
+// eachComponent calls visit for every component in spec, at any depth.
+func eachComponent(spec map[string]any, visit func(kind bpclient.Kind, c map[string]any)) {
 	if spec == nil {
 		return
 	}
 	for field, kind := range componentFields {
-		list, _ := spec[field].([]any)
-		for _, e := range list {
-			c, _ := e.(map[string]any)
-			if c == nil {
-				continue
-			}
-			name, _ := c["name"].(string)
-			typ, _ := c["type"].(string)
-			if name != "" && typ == "" {
-				if kind != "" {
-					w.fetch(kind, name)
-				}
-				continue
-			}
-			// Inline: it carries its own definition, so only its type and
-			// any nested references need pulling in.
-			if typ != "" {
-				w.needType(kind, typ)
-			}
-			w.follow(c)
+		for _, c := range componentList(spec, field) {
+			visit(kind, c)
+			// A bundle holds components of its own.
+			eachComponent(c, visit)
 		}
 	}
+}
+
+// componentList returns the components a spec stores under field. They live
+// in one of two places: spec.<field>, and — for a processor bundle saved
+// before Bindplane moved them — a parameter named <field> whose value is the
+// list (model/configuration.go:3722). A bundle in the older shape keeps its
+// children out of spec.processors entirely, so a traversal that only reads
+// spec.<field> never sees them, and the types they need never travel.
+func componentList(spec map[string]any, field string) []map[string]any {
+	var out []map[string]any
+	add := func(v any) {
+		list, _ := v.([]any)
+		for _, e := range list {
+			if c, ok := e.(map[string]any); ok {
+				out = append(out, c)
+			}
+		}
+	}
+	add(spec[field])
+
+	params, _ := spec["parameters"].([]any)
+	for _, p := range params {
+		pm, _ := p.(map[string]any)
+		if pm == nil {
+			continue
+		}
+		if n, _ := pm["name"].(string); n == field {
+			add(pm["value"])
+		}
+	}
+	return out
+}
+
+// isReference reports whether a component points at a library resource
+// rather than carrying its own definition. An inline component always has a
+// type; a reference names a resource and has none.
+func isReference(c map[string]any) (name string, ok bool) {
+	name, _ = c["name"].(string)
+	typ, _ := c["type"].(string)
+	return name, name != "" && typ == ""
+}
+
+// follow pulls in everything a spec's components need: the library
+// resources they reference, and the type definitions they are built on.
+func (w *walker) follow(spec map[string]any) {
+	eachComponent(spec, func(kind bpclient.Kind, c map[string]any) {
+		if name, ok := isReference(c); ok {
+			if kind != "" { // a kind with no REST collection is always inline
+				w.fetch(kind, name)
+			}
+			return
+		}
+		if typ, _ := c["type"].(string); typ != "" {
+			w.needType(kind, typ)
+		}
+	})
 }
 
 // needType pulls in the type definition a component of this kind is built
@@ -466,31 +538,19 @@ func unpin(spec map[string]any, owner string) []string {
 	if spec == nil {
 		return nil
 	}
-	var out []string
-
 	// The resource's own type, for a library resource.
-	out = append(out, unpinType(spec, owner)...)
+	out := unpinType(spec, owner)
 
-	for field := range componentFields {
-		list, _ := spec[field].([]any)
-		for _, e := range list {
-			c, _ := e.(map[string]any)
-			if c == nil {
-				continue
+	eachComponent(spec, func(_ bpclient.Kind, c map[string]any) {
+		if name, ok := isReference(c); ok {
+			if bare := bpclient.TrimVersion(name); bare != name {
+				c["name"] = bare
+				out = append(out, fmt.Sprintf("%s: reference %q now tracks the destination's current version", owner, name))
 			}
-			name, _ := c["name"].(string)
-			typ, _ := c["type"].(string)
-			if name != "" && typ == "" {
-				if bare := bpclient.TrimVersion(name); bare != name {
-					c["name"] = bare
-					out = append(out, fmt.Sprintf("%s: reference %q now tracks the destination's current version", owner, name))
-				}
-				continue
-			}
-			// Inline: unpin its type, then its own nested references.
-			out = append(out, unpin(c, owner)...)
+			return
 		}
-	}
+		out = append(out, unpinType(c, owner)...)
+	})
 	return out
 }
 

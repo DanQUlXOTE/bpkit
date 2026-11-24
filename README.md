@@ -202,6 +202,12 @@ content the configuration actually uses, but writes every reference bare so it
 tracks the destination's current version. Each pin it drops is listed in the
 plan's warnings.
 
+Pins hide in more than one place. A processor bundle keeps its children in
+`spec.processors`, but a bundle saved before Bindplane moved them keeps them
+in a *parameter* named `processors` instead, and bundles nest. The traversal
+covers both shapes at any depth; anything it still cannot reach is reported in
+the plan as a surviving pin rather than applied silently.
+
 Bindplane re-pins what it stores, to its own current versions, so a resource
 bpkit already migrated reads back pinned while the prepared copy is bare. Both
 sides are normalized before comparison; otherwise everything already copied

@@ -856,3 +856,189 @@ func TestResultExplainsKnownFailures(t *testing.T) {
 		t.Fatalf("an unrecognized error needs no invented explanation, got %q", got)
 	}
 }
+
+// A processor bundle saved before Bindplane moved nested processors into
+// spec.processors keeps them in a parameter named "processors"
+// (model/configuration.go:3722). Those children still need their type
+// definitions, and still carry version pins that cannot resolve in the
+// destination — the failure looked like
+// "unknown ProcessorType: google_filter_regex:15".
+func TestLegacyBundleChildrenAreWalked(t *testing.T) {
+	src, dst := newFakeBP(t), newFakeBP(t)
+	cfg := config("cfg")
+	cfg["spec"].(map[string]any)["processors"] = []any{ref("SecOpsBundle")}
+	src.put("configurations", "cfg", cfg)
+	// The bundle keeps its children in a parameter, not spec.processors.
+	src.put("processors", "SecOpsBundle", map[string]any{
+		"kind":     "Processor",
+		"metadata": map[string]any{"name": "SecOpsBundle", "displayName": "SecOps Bundle"},
+		"spec": map[string]any{
+			"type": "processor_bundle:2",
+			"parameters": []any{
+				map[string]any{"name": "processors", "value": []any{
+					map[string]any{"name": "p-1", "type": "google_filter_regex:15"},
+					map[string]any{"name": "p-2", "type": "parse_timestamp:3"},
+				}},
+			},
+		},
+	})
+	for _, n := range []string{"processor_bundle", "google_filter_regex", "parse_timestamp"} {
+		src.putType("processor-types", n)
+	}
+
+	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Every type the bundle's children need must travel.
+	types := map[string]bool{}
+	for _, it := range p.Items {
+		if it.Kind == bpclient.KindProcessorType {
+			types[it.Title()] = true
+		}
+	}
+	for _, want := range []string{"processor_bundle", "google_filter_regex", "parse_timestamp"} {
+		if !types[want] {
+			t.Fatalf("ProcessorType %q did not travel; got %v", want, types)
+		}
+	}
+
+	// And no pin may survive into what is applied.
+	for i := range p.Items {
+		p.Items[i].Skip = false
+	}
+	if _, err := p.Apply(context.Background(), dst.client(t, "")); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(dst.applied)
+	for _, bad := range []string{"google_filter_regex:15", "parse_timestamp:3", "processor_bundle:2"} {
+		if strings.Contains(string(body), bad) {
+			t.Fatalf("pinned type %q was applied: %s", bad, body)
+		}
+	}
+}
+
+// Bundles nest, so the traversal must not stop at the first level.
+func TestNestedBundlesAreWalked(t *testing.T) {
+	src, dst := newFakeBP(t), newFakeBP(t)
+	middle := map[string]any{
+		"name": "p-mid", "type": "processor_bundle:2",
+		"processors": []any{map[string]any{"name": "p-inner", "type": "deep_processor:7"}},
+	}
+	cfg := config("cfg")
+	cfg["spec"].(map[string]any)["processors"] = []any{
+		map[string]any{"name": "p-outer", "type": "processor_bundle:2",
+			"parameters": []any{map[string]any{"name": "processors", "value": []any{middle}}}},
+	}
+	src.put("configurations", "cfg", cfg)
+	for _, n := range []string{"processor_bundle", "deep_processor"} {
+		src.putType("processor-types", n)
+	}
+
+	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, it := range p.Items {
+		if it.Kind == bpclient.KindProcessorType && it.Title() == "deep_processor" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("a type two bundles deep did not travel")
+	}
+	// The pin must be gone from what actually gets applied. (inner here is
+	// the fixture's own map; the walker works on the fetched copy.)
+	for i := range p.Items {
+		p.Items[i].Skip = false
+	}
+	if _, err := p.Apply(context.Background(), dst.client(t, "")); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(dst.applied)
+	if strings.Contains(string(body), "deep_processor:7") {
+		t.Fatalf("nested type still pinned in what was applied: %s", body)
+	}
+	if !strings.Contains(string(body), `"deep_processor"`) {
+		t.Fatalf("nested type missing after unpinning: %s", body)
+	}
+}
+
+// A library reference held in a legacy bundle parameter must be fetched too.
+func TestLegacyBundleLibraryReferenceIsFetched(t *testing.T) {
+	src, dst := newFakeBP(t), newFakeBP(t)
+	cfg := config("cfg")
+	cfg["spec"].(map[string]any)["processors"] = []any{
+		map[string]any{"name": "p-outer", "type": "processor_bundle:2",
+			"parameters": []any{map[string]any{"name": "processors", "value": []any{
+				ref("SharedScrub:5"),
+			}}}},
+	}
+	src.put("configurations", "cfg", cfg)
+	src.putType("processor-types", "processor_bundle")
+	src.putType("processor-types", "scrub")
+	src.put("processors", "SharedScrub:5", map[string]any{
+		"kind":     "Processor",
+		"metadata": map[string]any{"name": "SharedScrub"},
+		"spec":     map[string]any{"type": "scrub"},
+	})
+
+	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, it := range p.Items {
+		if it.Kind == bpclient.KindProcessor && it.Resource.Name() == "SharedScrub" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a library processor referenced from a legacy bundle did not travel; warnings %v", p.Warnings)
+	}
+}
+
+// A version pin in a shape unpin does not traverse must be reported rather
+// than silently applied, since the destination cannot resolve it.
+func TestSurvivingPinsAreReported(t *testing.T) {
+	src, dst := newFakeBP(t), newFakeBP(t)
+	cfg := config("cfg")
+	// An invented shape: a pinned type somewhere the traversal has no rule for.
+	cfg["spec"].(map[string]any)["somethingNew"] = map[string]any{
+		"widgets": []any{map[string]any{"name": "w-1", "type": "mystery_type:42"}},
+	}
+	src.put("configurations", "cfg", cfg)
+
+	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, w := range p.Warnings {
+		if strings.Contains(w, "mystery_type:42") && strings.Contains(w, "please report") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("an unreachable pin should be reported, warnings: %v", p.Warnings)
+	}
+}
+
+// A plan with everything unpinned must not cry wolf.
+func TestNoSurvivingPinWarningWhenClean(t *testing.T) {
+	src, dst := newFakeBP(t), newFakeBP(t)
+	src.put("configurations", "cfg", config("cfg", inline("tcp:9")))
+	src.putType("source-types", "tcp")
+
+	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range p.Warnings {
+		if strings.Contains(w, "please report") {
+			t.Fatalf("false positive: %q", w)
+		}
+	}
+}
