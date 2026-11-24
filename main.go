@@ -21,6 +21,13 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// version is the released build, set at link time with
+//
+//	-ldflags "-X main.version=v1.2.3"
+//
+// and left as "dev" for a local build.
+var version = "dev"
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -30,9 +37,9 @@ func main() {
 
 func run() error {
 	var (
-		server, csvPath, query, selector, version, profileName string
-		apiKeyEnv, user, pass, project                         string
-		apply, skipTLS                                         bool
+		server, csvPath, query, selector, profileName    string
+		collectorVersion, apiKeyEnv, user, pass, project string
+		apply, skipTLS                                   bool
 	)
 	flag.StringVar(&server, "server", os.Getenv("BINDPLANE_URL"), "Bindplane server URL (env: $BINDPLANE_URL). Passing --server explicitly overrides the default profile")
 	flag.StringVar(&profileName, "profile", "", "Saved profile to connect with (default: the profile marked default; manage profiles in the TUI with p)")
@@ -44,12 +51,18 @@ func run() error {
 
 	flag.StringVar(&query, "query", "", "Labeler: initial collector query, e.g. os:linux")
 	flag.StringVar(&selector, "selector", "", "Labeler: initial label selector, e.g. env=prod")
-	flag.StringVar(&version, "version", "", "Labeler: initial current-version filter, e.g. 1.60.0 or 1.60")
+	flag.StringVar(&collectorVersion, "collector-version", "", "Labeler: initial current-version filter, e.g. 1.60.0 or 1.60")
 	flag.StringVar(&csvPath, "csv", "", "Labeler: CSV of hostname/agent-id and labels. Runs headless instead of the TUI")
 	flag.BoolVar(&apply, "apply", false, "With --csv: actually apply label changes (default is a dry run). The TUI always starts as a dry run and asks for confirmation")
 
+	showVersion := flag.Bool("version", false, "Print the bpkit version and exit")
 	flag.Usage = usage
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("bpkit", version)
+		return nil
+	}
 
 	// Carry profiles over from bp_labeler the first time bpkit runs.
 	if moved, err := profiles.MigrateLegacy(); err == nil && moved {
@@ -79,7 +92,7 @@ func run() error {
 	}
 
 	exts := []ext.Extension{
-		labeler.Ext{Query: query, Selector: selector, Version: version},
+		labeler.Ext{Query: query, Selector: selector, Version: collectorVersion},
 		cloner.Ext{},
 		migrator.Ext{},
 	}
@@ -99,7 +112,7 @@ func run() error {
 
 func usage() {
 	out := flag.CommandLine.Output()
-	fmt.Fprintln(out, "bpkit — a terminal toolkit for the Bindplane API.")
+	fmt.Fprintf(out, "bpkit %s — a terminal toolkit for the Bindplane API.\n", version)
 	fmt.Fprintln(out, "\nUsage:\n  bpkit [flags] [tool]")
 	fmt.Fprintln(out, "\nTools:")
 	fmt.Fprintln(out, "  label     Bulk set/remove labels, assign a fleet, upgrade collectors")

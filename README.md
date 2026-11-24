@@ -1,5 +1,7 @@
 # bpkit
 
+[![CI](https://github.com/DanQUlXOTE/bpkit/actions/workflows/ci.yml/badge.svg)](https://github.com/DanQUlXOTE/bpkit/actions/workflows/ci.yml)
+
 A terminal toolkit for the Bindplane API. bpkit owns the connections — saved
 as profiles, switchable at any time — and the tools plug into it:
 
@@ -46,11 +48,31 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o bpk
 
 Use `GOOS=windows` and an `.exe` output name for Windows.
 
+Prebuilt binaries for macOS, Linux and Windows are on the
+[Releases](https://github.com/DanQUlXOTE/bpkit/releases) page, with a SHA-256
+for each archive in `checksums.txt`. `bpkit --version` reports which build you
+are running.
+
 To run the tests:
 
 ```bash
 go test ./...
 ```
+
+`internal/migrate/live_probe_test.go` is a diagnostic that runs a real
+migration; it skips unless `BPKIT_LIVE=1`, and writes nothing without
+`BPKIT_APPLY=1`, so `go test ./...` stays offline.
+
+### Releasing
+
+Pushing a `v*` tag builds every platform and publishes a GitHub Release:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+Running the Release workflow by hand from the Actions tab builds the same
+archives and leaves them as workflow artifacts, without publishing anything.
 
 ## Profiles
 

@@ -1,0 +1,87 @@
+name: Release
+
+# Pushing a v* tag publishes a GitHub Release. Running it by hand from the
+# Actions tab builds the same archives and leaves them as workflow
+# artifacts, so you can get binaries without publishing anything.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Version
+        id: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build every platform
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # CGO is off, so one runner cross-compiles the lot.
+          for target in \
+            darwin/amd64 darwin/arm64 \
+            linux/amd64 linux/arm64 \
+            windows/amd64
+          do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            name="bpkit"
+            [ "$goos" = "windows" ] && name="bpkit.exe"
+
+            echo "building $goos/$goarch"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -trimpath \
+                -ldflags "-s -w -X main.version=${VERSION}" \
+                -o "dist/$name" .
+
+            base="bpkit_${VERSION}_${goos}_${goarch}"
+            if [ "$goos" = "windows" ]; then
+              (cd dist && zip -q "${base}.zip" "$name" && rm "$name")
+            else
+              (cd dist && tar -czf "${base}.tar.gz" "$name" && rm "$name")
+            fi
+          done
+
+          # One checksums file covering every archive, as bp_labeler did.
+          (cd dist && sha256sum * > checksums.txt)
+          ls -l dist
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bpkit-${{ steps.version.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes
