@@ -144,6 +144,15 @@ func TestLiveProbe(t *testing.T) {
 		}
 	}
 
+	// BPKIT_PLACEHOLDER fills every pending credential with that value, the
+	// way --placeholder-credentials does.
+	if ph := os.Getenv("BPKIT_PLACEHOLDER"); ph != "" {
+		for _, s := range p.Pending() {
+			s.Set(ph)
+		}
+		t.Logf("filled %d credential(s) with %q", len(p.Secrets)-len(p.Unfilled()), ph)
+	}
+
 	if os.Getenv("BPKIT_APPLY") == "" {
 		t.Log("set BPKIT_APPLY=1 to apply")
 		return

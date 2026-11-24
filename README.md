@@ -251,6 +251,50 @@ The trade-off is that a migrated configuration follows the destination's
 current version rather than staying frozen, which is the only thing that can
 work across projects.
 
+### Migrating from the command line
+
+The migrator also runs headless, which is how a whole project moves in one
+go. It is a dry run until `--apply`, and even then it asks you to type the
+destination name:
+
+```bash
+# What would happen, in full. Sends nothing.
+bpkit --profile "Dan Demo" --to-project 01M87FC8XTVSE6CQQGSCKG0HDJ
+
+# Just two configurations, and do it.
+bpkit --profile "Dan Demo" --to-profile staging --config web,api --apply
+```
+
+`--to-project` reuses the source's server and API key against another
+project, which is what an org-scoped key is for. `--to-profile` connects as a
+different saved profile, for another server or key. `--config` narrows the run
+to named configurations; the default is every one in the source. `--yes` skips
+the typed confirmation, for scripts.
+
+Conflicts are never overwritten from the command line: a resource that already
+exists in the destination and differs is reported and left alone, because
+deciding that wants the diff the TUI can show you.
+
+By default a resource whose credential the source will not disclose is left
+out, along with anything referencing it, and both are named so you know what
+to finish by hand. `--placeholder-credentials` copies them instead, filling
+each credential with `REPLACE-ME-bpkit-migrated` (or `--placeholder-value`),
+and prints the list to repair:
+
+```
+1 credential(s) were filled with the placeholder "REPLACE-ME-bpkit-migrated".
+These resources exist in the destination but WILL NOT WORK until you
+replace each value with the real one in the Bindplane UI.
+
+  destination "TestDynatraceYaml-dest-dynatrace_otlp-0" → dynatrace_api_token
+```
+
+That trade is the point: the whole structure arrives in one run and the
+credentials become a short checklist, rather than a migration that stops at
+the first destination holding a secret. Do not roll such a configuration out
+to collectors before replacing the values — it will authenticate with the
+placeholder and fail.
+
 ### Credentials
 
 Bindplane never discloses a sensitive parameter: it reads back as

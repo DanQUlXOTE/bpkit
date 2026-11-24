@@ -14,6 +14,7 @@ import (
 	"bpkit/internal/exts/cloner"
 	"bpkit/internal/exts/labeler"
 	"bpkit/internal/exts/migrator"
+	"bpkit/internal/migrate"
 	"bpkit/internal/plan"
 	"bpkit/internal/profiles"
 	"bpkit/internal/shell"
@@ -53,11 +54,30 @@ func run() error {
 	flag.StringVar(&selector, "selector", "", "Labeler: initial label selector, e.g. env=prod")
 	flag.StringVar(&collectorVersion, "collector-version", "", "Labeler: initial current-version filter, e.g. 1.60.0 or 1.60")
 	flag.StringVar(&csvPath, "csv", "", "Labeler: CSV of hostname/agent-id and labels. Runs headless instead of the TUI")
-	flag.BoolVar(&apply, "apply", false, "With --csv: actually apply label changes (default is a dry run). The TUI always starts as a dry run and asks for confirmation")
+	flag.BoolVar(&apply, "apply", false, "With --csv or the migrate tool: actually write (default is a dry run). The TUI always starts as a dry run and asks for confirmation")
+
+	var mig migrateOptions
+	flag.StringVar(&mig.toProject, "to-project", "", "Migrate: destination project id, using the same server and key as the source")
+	flag.StringVar(&mig.toProfile, "to-profile", "", "Migrate: destination profile, for another server or API key")
+	flag.StringVar(&mig.configs, "config", "", "Migrate: comma-separated configuration names (default: every configuration)")
+	flag.BoolVar(&mig.usePlace, "placeholder-credentials", false, "Migrate: copy resources whose credentials the source will not disclose, filling each with a placeholder to replace in the UI afterwards (default: leave those resources out)")
+	flag.StringVar(&mig.placeholder, "placeholder-value", migrate.DefaultPlaceholder, "Migrate: the value --placeholder-credentials writes")
+	flag.BoolVar(&mig.assumeYes, "yes", false, "Migrate: skip the typed confirmation (for scripts)")
 
 	showVersion := flag.Bool("version", false, "Print the bpkit version and exit")
 	flag.Usage = usage
 	flag.Parse()
+
+	// Setting a placeholder value implies wanting placeholders.
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "placeholder-value" {
+			mig.usePlace = true
+		}
+	})
+	if strings.TrimSpace(mig.placeholder) == "" {
+		mig.placeholder = migrate.DefaultPlaceholder
+	}
+	mig.apply = apply
 
 	if *showVersion {
 		fmt.Println("bpkit", version)
@@ -81,6 +101,11 @@ func run() error {
 		user, pass)
 	if err != nil {
 		return err
+	}
+
+	// Headless: migrate without opening the TUI.
+	if mig.toProject != "" || mig.toProfile != "" {
+		return runMigrate(store, active, client, mig, os.Stdin, os.Stdout)
 	}
 
 	// Headless: label from a CSV without opening the TUI.
@@ -120,6 +145,9 @@ func usage() {
 	fmt.Fprintln(out, "  migrate   Copy configurations and their dependencies to another project")
 	fmt.Fprintln(out, "\nWith no tool, bpkit opens its menu. Connections are saved as profiles;")
 	fmt.Fprintln(out, "press p on the menu, or ctrl+p inside a tool, to manage them.")
+	fmt.Fprintln(out, "\nHeadless runs, both a dry run until --apply:")
+	fmt.Fprintln(out, "  bpkit --to-project <id> [--config a,b] [--placeholder-credentials] --apply")
+	fmt.Fprintln(out, "  bpkit --csv hosts.csv --apply")
 	fmt.Fprintln(out, "\nFlags:")
 	flag.PrintDefaults()
 }
