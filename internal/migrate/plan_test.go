@@ -728,3 +728,88 @@ func TestTypeVersionPinsAreStripped(t *testing.T) {
 		t.Fatalf("want 3 type-pin warnings, got %d: %v", pins, p.Warnings)
 	}
 }
+
+// Bindplane re-pins references and types to its own current version on
+// write (model/configuration.go:3706). A resource bpkit already migrated
+// therefore comes back pinned while the prepared copy is bare, and must
+// still compare as identical rather than as a conflict against itself.
+func TestRepinnedDestinationIsNotAConflict(t *testing.T) {
+	src, dst := newFakeBP(t), newFakeBP(t)
+	srcDest := map[string]any{
+		"kind":     "Destination",
+		"metadata": map[string]any{"name": "NewChronicleDest"},
+		"spec":     map[string]any{"type": "chronicle:28"},
+	}
+	src.put("configurations", "cfg", config("cfg"))
+	cfgSpec := src.res["configurations/cfg"]["spec"].(map[string]any)
+	cfgSpec["destinations"] = []any{ref("NewChronicleDest:16")}
+	src.put("destinations", "NewChronicleDest:16", srcDest)
+
+	// The destination holds the same resource, re-pinned to its own versions.
+	dst.put("destinations", "NewChronicleDest", map[string]any{
+		"kind":     "Destination",
+		"metadata": map[string]any{"name": "NewChronicleDest", "version": 1},
+		"spec":     map[string]any{"type": "chronicle:31"},
+	})
+
+	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range p.Items {
+		if it.Kind != bpclient.KindDestination {
+			continue
+		}
+		if it.Status != StatusSame {
+			t.Fatalf("a re-pinned copy of the same resource must be identical, got %v (diff %v)", it.Status, it.Diff)
+		}
+	}
+}
+
+// A genuine difference must still be reported once pins are normalized.
+func TestRealDifferenceStillConflicts(t *testing.T) {
+	src, dst := newFakeBP(t), newFakeBP(t)
+	src.put("configurations", "cfg", config("cfg"))
+	src.res["configurations/cfg"]["spec"].(map[string]any)["destinations"] = []any{ref("d1")}
+	src.put("destinations", "d1", map[string]any{
+		"kind": "Destination",
+		"spec": map[string]any{"type": "chronicle:28", "parameters": []any{param("region", "us")}},
+	})
+	dst.put("destinations", "d1", map[string]any{
+		"kind": "Destination",
+		"spec": map[string]any{"type": "chronicle:31", "parameters": []any{param("region", "eu")}},
+	})
+
+	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range p.Items {
+		if it.Kind != bpclient.KindDestination {
+			continue
+		}
+		if it.Status != StatusConflict {
+			t.Fatalf("a changed parameter must conflict, got %v", it.Status)
+		}
+		if len(it.Diff) != 1 || it.Diff[0] != "parameters" {
+			t.Fatalf("diff should name parameters only, got %v", it.Diff)
+		}
+	}
+}
+
+// The same type used by several components is reported once, not per use.
+func TestUnpinWarningsAreDeduplicated(t *testing.T) {
+	src, dst := newFakeBP(t), newFakeBP(t)
+	src.put("configurations", "cfg", config("cfg",
+		inline("tcp:9"), inline("tcp:9"), inline("tcp:9"), inline("file_v2:19")))
+	for _, n := range []string{"tcp", "file_v2"} {
+		src.put("source-types", n, map[string]any{"kind": "SourceType", "spec": map[string]any{}})
+	}
+	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Warnings) != 2 {
+		t.Fatalf("want one warning per distinct pin, got %d: %v", len(p.Warnings), p.Warnings)
+	}
+}

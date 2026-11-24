@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -162,7 +163,7 @@ func Build(ctx context.Context, src, dst *bpclient.Client, configNames []string)
 					meta["name"] = bpclient.TrimVersion(n)
 				}
 			}
-			p.Warnings = append(p.Warnings, unpin(r.Spec(), r.Title())...)
+			p.Warnings = appendUnique(p.Warnings, unpin(r.Spec(), r.Title())...)
 			item := Item{
 				Kind:     kind,
 				Resource: r,
@@ -204,9 +205,13 @@ func compare(ctx context.Context, dst *bpclient.Client, item *Item) {
 		return
 	}
 	item.Existing = existing
-	cp := bpclient.Resource(deepCopy(existing))
-	cp.StripServerFields()
-	if diff := specDiff(cp, item.Resource); len(diff) == 0 {
+	// Compare like for like. Bindplane re-pins every reference and type to
+	// its own current version on write (model/configuration.go:3706), so
+	// the destination's copy of a resource we applied comes back pinned
+	// while ours is bare. Without normalizing both sides, every resource
+	// already migrated would report as a conflict against itself.
+	cp := forDiff(existing)
+	if diff := specDiff(cp, forDiff(item.Resource)); len(diff) == 0 {
 		item.Status = StatusSame
 	} else {
 		item.Status, item.Diff = StatusConflict, diff
@@ -236,6 +241,32 @@ func specDiff(a, b bpclient.Resource) []string {
 		out = append(out, "displayName")
 	}
 	sort.Strings(out)
+	return out
+}
+
+// forDiff returns a copy of r with the server's bookkeeping and all
+// version pins removed, so two resources are compared on their substance.
+func forDiff(r bpclient.Resource) bpclient.Resource {
+	cp := bpclient.Resource(deepCopy(r))
+	cp.StripServerFields()
+	if meta, ok := cp["metadata"].(map[string]any); ok {
+		if n, _ := meta["name"].(string); n != "" {
+			meta["name"] = bpclient.TrimVersion(n)
+		}
+	}
+	unpin(cp.Spec(), "")
+	return cp
+}
+
+// appendUnique appends the items of add that out does not already hold.
+// One configuration often uses the same type in several components, and
+// repeating the same note per occurrence buries the rest of the plan.
+func appendUnique(out []string, add ...string) []string {
+	for _, s := range add {
+		if !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
 	return out
 }
 

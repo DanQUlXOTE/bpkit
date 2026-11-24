@@ -200,6 +200,11 @@ content the configuration actually uses, but writes every reference bare so it
 tracks the destination's current version. Each pin it drops is listed in the
 plan's warnings.
 
+Bindplane re-pins what it stores, to its own current versions, so a resource
+bpkit already migrated reads back pinned while the prepared copy is bare. Both
+sides are normalized before comparison; otherwise everything already copied
+would report as a conflict against itself.
+
 The trade-off is that a migrated configuration follows the destination's
 current version rather than staying frozen, which is the only thing that can
 work across projects.
