@@ -12,8 +12,9 @@ as profiles, switchable at any time — and the tools plug into it:
 | **Config migrator** | Copy configurations, and every source/processor/destination/extension they reference, into another project or organization. |
 
 Nothing changes until you confirm. Every tool shows a dry run first and asks
-you to type `confirm`. Headless CSV runs are a dry run unless you pass
-`--apply`.
+you to type `confirm`. The two headless modes — labelling from a CSV, and
+[migrating a whole project](#migrating-from-the-command-line) — are a dry run
+unless you pass `--apply`.
 
 ```
 bpkit
@@ -121,6 +122,13 @@ collectors, then apply changes.
   name rather than its display name.
 - `u` upgrades the selection to a version Bindplane offers.
 - `v` previews. Nothing is sent until you type `confirm`.
+
+`--query`, `--selector` and `--collector-version` prefill the search screen, so
+you can open straight into a filtered list.
+
+> Coming from `bp_labeler`: that tool's `--version` flag is now
+> `--collector-version`. In a kit with three tools, `--version` reports the
+> version of bpkit itself.
 
 ### Headless CSV labeling
 
@@ -251,6 +259,23 @@ The trade-off is that a migrated configuration follows the destination's
 current version rather than staying frozen, which is the only thing that can
 work across projects.
 
+### Credentials
+
+Bindplane never discloses a sensitive parameter: it reads back as
+`(sensitive)`. The migrator finds every one of them before applying and asks
+you for the real value, naming the resource and parameter.
+
+Only resources the plan is actually applying are asked about — a credential on
+a destination the target already has is never sent, so bpkit does not ask for
+it.
+
+Fill in the ones it does ask for. A resource whose credential is still unset is
+**refused outright** — Bindplane rejects the `(sensitive)` placeholder with "has masked
+(sensitive) values that cannot be restored" — so leaving one blank does not
+produce a half-configured resource, it produces none at all, and every
+configuration referencing it then fails too. The plan says how many are unset
+before you confirm.
+
 ### Migrating from the command line
 
 The migrator also runs headless, which is how a whole project moves in one
@@ -294,23 +319,6 @@ credentials become a short checklist, rather than a migration that stops at
 the first destination holding a secret. Do not roll such a configuration out
 to collectors before replacing the values — it will authenticate with the
 placeholder and fail.
-
-### Credentials
-
-Bindplane never discloses a sensitive parameter: it reads back as
-`(sensitive)`. The migrator finds every one of them before applying and asks
-you for the real value, naming the resource and parameter.
-
-Only resources the plan is actually applying are asked about — a credential on
-a destination the target already has is never sent, so bpkit does not ask for
-it.
-
-Fill in the ones it does ask for. A resource whose credential is still unset is
-**refused outright** — Bindplane rejects the `(sensitive)` placeholder with "has masked
-(sensitive) values that cannot be restored" — so leaving one blank does not
-produce a half-configured resource, it produces none at all, and every
-configuration referencing it then fails too. The plan says how many are unset
-before you confirm.
 
 ## Adding a tool
 
