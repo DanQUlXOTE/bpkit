@@ -155,6 +155,14 @@ func Build(ctx context.Context, src, dst *bpclient.Client, configNames []string)
 	for _, kind := range bpclient.ResourceKinds {
 		for _, r := range w.byKind[kind] {
 			r.StripServerFields()
+			// A resource read by a pinned reference must still be created
+			// under its bare name, whatever the server echoed back.
+			if meta, ok := r["metadata"].(map[string]any); ok {
+				if n, _ := meta["name"].(string); n != "" {
+					meta["name"] = bpclient.TrimVersion(n)
+				}
+			}
+			p.Warnings = append(p.Warnings, unpinReferences(r.Spec(), r.Title())...)
 			item := Item{
 				Kind:     kind,
 				Resource: r,
@@ -359,19 +367,62 @@ func (w *walker) needType(kind bpclient.Kind, typeRef string) {
 	w.fetch(tk, bpclient.TrimVersion(typeRef))
 }
 
-func (w *walker) fetch(kind bpclient.Kind, name string) {
+// fetch reads one resource from the source. ref may carry a ":version"
+// pin, which is kept for the read — the pinned version is the content the
+// configuration actually uses — but dropped for deduplication, so a
+// resource referenced at two versions is still fetched once.
+func (w *walker) fetch(kind bpclient.Kind, ref string) {
+	name := bpclient.TrimVersion(ref)
 	key := string(kind) + "/" + name
 	if w.seen[key] {
 		return
 	}
-	r, err := w.src.GetResource(w.ctx, kind, name)
+	r, err := w.src.GetResource(w.ctx, kind, ref)
 	if err != nil {
 		w.seen[key] = true
 		w.warnings = append(w.warnings,
-			fmt.Sprintf("could not read %s %q from the source: %v", strings.TrimSuffix(string(kind), "s"), name, err))
+			fmt.Sprintf("could not read %s %q from the source: %v", strings.TrimSuffix(string(kind), "s"), ref, err))
 		return
 	}
 	w.add(kind, r)
+}
+
+// unpinReferences rewrites a spec's library references to bare names,
+// dropping any ":version" pin, and reports each one it changed.
+//
+// A reference like "Aurepoll:17" asks for that exact version of the
+// resource — Bindplane looks a library resource up by name AND version,
+// unlike a component's type, which it resolves by bare name. The
+// destination's freshly created copy is at version 1, so a pinned
+// reference cannot resolve there and the configuration fails to render
+// with "unknown Source: Aurepoll:17". A bare name resolves to the
+// destination's current version, which is the copy we just applied.
+func unpinReferences(spec map[string]any, owner string) []string {
+	if spec == nil {
+		return nil
+	}
+	var out []string
+	for field := range componentFields {
+		list, _ := spec[field].([]any)
+		for _, e := range list {
+			c, _ := e.(map[string]any)
+			if c == nil {
+				continue
+			}
+			name, _ := c["name"].(string)
+			typ, _ := c["type"].(string)
+			if name != "" && typ == "" {
+				if bare := bpclient.TrimVersion(name); bare != name {
+					c["name"] = bare
+					out = append(out, fmt.Sprintf("%s: reference %q now tracks the destination's current version", owner, name))
+				}
+				continue
+			}
+			// Inline components can hold references of their own.
+			out = append(out, unpinReferences(c, owner)...)
+		}
+	}
+	return out
 }
 
 // ------------------------------------------------------- secret detection

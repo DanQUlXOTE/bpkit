@@ -77,14 +77,19 @@ func typeKind(collection string) string {
 	return b.String()
 }
 
-func (f *fakeBP) put(kind, name string, res map[string]any) {
+// put stores a resource under the given lookup key. The key may carry a
+// version pin; metadata.name is left alone when the caller set it, so a
+// fixture can model a server that answers a pinned read with a bare name.
+func (f *fakeBP) put(key, lookup string, res map[string]any) {
 	meta, _ := res["metadata"].(map[string]any)
 	if meta == nil {
 		meta = map[string]any{}
 		res["metadata"] = meta
 	}
-	meta["name"] = name
-	f.res[kind+"/"+name] = res
+	if n, _ := meta["name"].(string); n == "" {
+		meta["name"] = lookup
+	}
+	f.res[key+"/"+lookup] = res
 }
 
 func (f *fakeBP) client(t *testing.T, project string) *bpclient.Client {
@@ -531,5 +536,139 @@ func TestUnreadableDestinationIsNotTreatedAsNew(t *testing.T) {
 	}
 	if apply, _, _ := p.Counts(); apply != 0 {
 		t.Fatalf("apply=%d, want 0", apply)
+	}
+}
+
+// A configuration pins its library references to a version ("Aurepoll:17").
+// The destination's fresh copy is at version 1, so a pinned reference cannot
+// resolve there and the render fails with "unknown Source: Aurepoll:17".
+// References must arrive bare, tracking whatever version the destination
+// assigned.
+func TestVersionPinsAreStrippedFromReferences(t *testing.T) {
+	src, dst := newFakeBP(t), newFakeBP(t)
+	cfg := config("Dan Demo", ref("Aurepoll:17"))
+	cfg["spec"].(map[string]any)["destinations"] = []any{ref("devnull:9")}
+	src.put("configurations", "Dan Demo", cfg)
+	// The source serves the pinned reads; metadata.name stays bare.
+	src.put("sources", "Aurepoll:17", map[string]any{
+		"kind":     "Source",
+		"metadata": map[string]any{"name": "Aurepoll"},
+		"spec":     map[string]any{"type": "azure_blob_polling"},
+	})
+	src.put("destinations", "devnull:9", map[string]any{
+		"kind":     "Destination",
+		"metadata": map[string]any{"name": "devnull"},
+		"spec":     map[string]any{"type": "dev_null"},
+	})
+
+	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"Dan Demo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The pinned versions were read from the source: that is the content the
+	// configuration actually uses.
+	names := map[string]bool{}
+	for _, it := range p.Items {
+		names[string(it.Kind)+"/"+it.Resource.Name()] = true
+	}
+	for _, want := range []string{"sources/Aurepoll", "destinations/devnull"} {
+		if !names[want] {
+			t.Fatalf("%s did not travel; got %v", want, names)
+		}
+	}
+
+	// The configuration's references must be bare.
+	var cfgItem Item
+	for _, it := range p.Items {
+		if it.Kind == bpclient.KindConfiguration {
+			cfgItem = it
+		}
+	}
+	spec := cfgItem.Resource.Spec()
+	srcRef := spec["sources"].([]any)[0].(map[string]any)["name"]
+	dstRef := spec["destinations"].([]any)[0].(map[string]any)["name"]
+	if srcRef != "Aurepoll" {
+		t.Fatalf("source reference = %q, want %q", srcRef, "Aurepoll")
+	}
+	if dstRef != "devnull" {
+		t.Fatalf("destination reference = %q, want %q", dstRef, "devnull")
+	}
+
+	// And the user is told the pins were dropped.
+	var pinned int
+	for _, w := range p.Warnings {
+		if strings.Contains(w, "current version") {
+			pinned++
+		}
+	}
+	if pinned != 2 {
+		t.Fatalf("want a warning per dropped pin, got %d: %v", pinned, p.Warnings)
+	}
+
+	// Nothing with a ":" survives into what is applied.
+	for i := range p.Items {
+		p.Items[i].Skip = p.Items[i].TypeDef
+	}
+	if _, err := p.Apply(context.Background(), dst.client(t, "")); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(dst.applied)
+	for _, bad := range []string{"Aurepoll:17", "devnull:9"} {
+		if strings.Contains(string(body), bad) {
+			t.Fatalf("pinned reference %q was applied: %s", bad, body)
+		}
+	}
+}
+
+// An inline component's own references are pinned the same way and need the
+// same treatment.
+func TestVersionPinsStrippedInsideInlineComponents(t *testing.T) {
+	src, dst := newFakeBP(t), newFakeBP(t)
+	inlineSrc := inline("otlp")
+	inlineSrc["processors"] = []any{ref("scrub:4")}
+	src.put("configurations", "cfg", config("cfg", inlineSrc))
+	src.put("processors", "scrub:4", map[string]any{
+		"kind":     "Processor",
+		"metadata": map[string]any{"name": "scrub"},
+		"spec":     map[string]any{"type": "batch"},
+	})
+
+	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfgItem Item
+	for _, it := range p.Items {
+		if it.Kind == bpclient.KindConfiguration {
+			cfgItem = it
+		}
+	}
+	got := cfgItem.Resource.Spec()["sources"].([]any)[0].(map[string]any)["processors"].([]any)[0].(map[string]any)["name"]
+	if got != "scrub" {
+		t.Fatalf("nested reference = %q, want %q", got, "scrub")
+	}
+}
+
+// Defensive: if the server answers a pinned read by echoing the pinned name
+// back in metadata.name, the copy must still be created under the bare name
+// rather than one containing a colon.
+func TestPinnedNameNeverBecomesTheResourceName(t *testing.T) {
+	src, dst := newFakeBP(t), newFakeBP(t)
+	src.put("configurations", "cfg", config("cfg", ref("Aurepoll:17")))
+	src.put("sources", "Aurepoll:17", map[string]any{
+		"kind": "Source",
+		// no explicit metadata.name: the fixture echoes the pinned lookup
+		"spec": map[string]any{"type": "otlp"},
+	})
+
+	p, err := Build(context.Background(), src.client(t, ""), dst.client(t, ""), []string{"cfg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range p.Items {
+		if strings.Contains(it.Resource.Name(), ":") {
+			t.Fatalf("resource name carries a version pin: %q", it.Resource.Name())
+		}
 	}
 }

@@ -182,6 +182,19 @@ Resources apply in dependency order — type definitions, then sources,
 processors, destinations and extensions, then configurations — so nothing
 references something that is not there yet.
 
+### Version pins
+
+A configuration references a library resource by name and version, such as
+`Aurepoll:17`. Bindplane resolves that pair exactly — unlike a component's
+type, which it resolves by bare name — so a pinned reference cannot resolve
+against a destination where the copy was just created at version 1, and the
+render fails with `unknown Source: Aurepoll:17`.
+
+The migrator therefore reads the pinned version from the source, since that is
+the content the configuration actually uses, but writes the reference bare so
+it tracks whatever version the destination assigns. Each pin it drops is
+listed in the plan's warnings.
+
 ### Credentials
 
 Bindplane never discloses a sensitive parameter: it reads back as
