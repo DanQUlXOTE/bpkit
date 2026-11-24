@@ -373,6 +373,13 @@ func (r Result) Explain() string {
 		strings.Contains(msg, "unknown Processor"):
 		return "The destination has no such resource. It was probably skipped in the " +
 			"plan; include it and apply again."
+	case strings.Contains(msg, "parameter value for"):
+		return "The copy is faithful: this is the value stored in the source being " +
+			"rejected by the destination. Bindplane validates on save, not on read, so a " +
+			"value saved before its rule existed survives in the source and only fails " +
+			"when something writes it again. Fix the parameter in the source and migrate " +
+			"again, or exclude this resource from the plan with space. Nothing else of " +
+			"this kind was applied, since the whole batch is rejected together."
 	}
 	return ""
 }

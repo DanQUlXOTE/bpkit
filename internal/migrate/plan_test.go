@@ -842,6 +842,8 @@ func TestResultExplainsKnownFailures(t *testing.T) {
 			`incompatible types for comparison: float64 and int`, "Bindplane bug"},
 		{"unknown ProcessorType: parse_timestamp", "no such type definition"},
 		{"unknown Source: Aurepoll", "no such resource"},
+		{"dest-0: 1 error occurred: * parameter value for 'custom_url' Enter only the base OTLP endpoint",
+			"faithful"},
 	}
 	for _, c := range cases {
 		got := Result{Err: errors.New(c.err)}.Explain()
